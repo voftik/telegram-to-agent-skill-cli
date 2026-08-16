@@ -209,9 +209,21 @@ class MessageDB:
         self.conn = sqlite3.connect(str(self.db_path))
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA busy_timeout = 30000")
-        self.conn.execute("PRAGMA journal_mode=WAL")
-        self.conn.executescript(_CREATE_TABLE + _CREATE_INDEX)
-        _migrate(self.conn)
+        # The whole open sequence (WAL switch, base DDL, migration) races
+        # with concurrent openers; each step is idempotent, so retrying on
+        # immediate-BUSY (deadlock detection skips busy_timeout) is safe.
+        import time as _time
+
+        for attempt in range(60):
+            try:
+                self.conn.execute("PRAGMA journal_mode=WAL")
+                self.conn.executescript(_CREATE_TABLE + _CREATE_INDEX)
+                _migrate(self.conn)
+                break
+            except sqlite3.OperationalError as e:
+                if "locked" not in str(e) or attempt == 59:
+                    raise
+                _time.sleep(0.05 * (attempt % 10 + 1))
 
     def __enter__(self):
         return self
