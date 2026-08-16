@@ -37,7 +37,21 @@ CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(sender_name);
 """
 
 # Schema v2: attachments, links, threads, FTS5 (fork additions).
-_SCHEMA_VERSION = 2
+# Schema v3: sync_gaps — gap-safe incremental sync cursors (#22).
+_SCHEMA_VERSION = 3
+
+_MIGRATION_V3 = """
+CREATE TABLE IF NOT EXISTS sync_gaps (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id    INTEGER NOT NULL,
+    from_id    INTEGER NOT NULL,  -- exclusive lower bound (msg_id > from_id)
+    to_id      INTEGER NOT NULL,  -- exclusive upper bound (msg_id < to_id)
+    kind       TEXT    NOT NULL DEFAULT 'gap',  -- gap: must-fill hole | backfill: older history
+    created_at TEXT,
+    UNIQUE(chat_id, from_id, to_id, kind)
+);
+CREATE INDEX IF NOT EXISTS idx_sync_gaps_chat ON sync_gaps(chat_id, kind);
+"""
 
 _MIGRATION_V2_TABLES = """
 CREATE TABLE IF NOT EXISTS attachments (
@@ -115,6 +129,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if not fts_existed:
         # Index everything already stored before the triggers existed.
         conn.execute("INSERT INTO messages_fts(messages_fts) VALUES ('rebuild')")
+
+    conn.executescript(_MIGRATION_V3)
 
     conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
     conn.commit()
@@ -763,6 +779,62 @@ class MessageDB:
             (root_id, chat_id, chat_id),
         ).fetchall()
         return [dict(r) for r in rows]
+
+    # ─────────────────── sync gap cursors (#22) ───────────────────
+
+    def record_gap(self, chat_id: int, from_id: int, to_id: int, kind: str = "gap") -> bool:
+        """Remember an unfetched message range (from_id, to_id), both exclusive.
+
+        Returns True when a non-empty range was recorded.
+        """
+        if to_id - from_id <= 1:
+            return False
+        self.conn.execute(
+            """INSERT OR IGNORE INTO sync_gaps (chat_id, from_id, to_id, kind, created_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (chat_id, from_id, to_id, kind, datetime.now(timezone.utc).isoformat()),
+        )
+        self.conn.commit()
+        return True
+
+    def get_gaps(self, chat_id: int | None = None, kind: str | None = None) -> list[dict]:
+        query = "SELECT * FROM sync_gaps WHERE 1=1"
+        params: list[Any] = []
+        if chat_id is not None:
+            query += " AND chat_id = ?"
+            params.append(chat_id)
+        if kind is not None:
+            query += " AND kind = ?"
+            params.append(kind)
+        query += " ORDER BY chat_id, to_id DESC"
+        return [dict(r) for r in self.conn.execute(query, params).fetchall()]
+
+    def shrink_gap(self, gap_id: int, new_to_id: int) -> None:
+        """Lower a gap's upper bound after a partial fill; delete when empty."""
+        row = self.conn.execute(
+            "SELECT from_id FROM sync_gaps WHERE id = ?", (gap_id,)
+        ).fetchone()
+        if row is None:
+            return
+        if new_to_id - row["from_id"] <= 1:
+            self.conn.execute("DELETE FROM sync_gaps WHERE id = ?", (gap_id,))
+        else:
+            self.conn.execute(
+                "UPDATE sync_gaps SET to_id = ? WHERE id = ?", (new_to_id, gap_id)
+            )
+        self.conn.commit()
+
+    def delete_gap(self, gap_id: int) -> None:
+        self.conn.execute("DELETE FROM sync_gaps WHERE id = ?", (gap_id,))
+        self.conn.commit()
+
+    def count_gaps(self, kind: str = "gap", chat_id: int | None = None) -> int:
+        query = "SELECT COUNT(*) FROM sync_gaps WHERE kind = ?"
+        params: list[Any] = [kind]
+        if chat_id is not None:
+            query += " AND chat_id = ?"
+            params.append(chat_id)
+        return self.conn.execute(query, params).fetchone()[0]
 
     def get_style_corpus(
         self,

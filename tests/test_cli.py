@@ -250,14 +250,27 @@ class TestRefreshAndSyncFirst:
 
         async def fake_sync_all_dialogs(*, limit, on_chat_done=None, delay=1.0, max_chats=None):
             assert limit == 5000
-            return {"ChatA": 2, "ChatB": 0}
+            return {
+                "enumerated": True,
+                "error": None,
+                "total": 2,
+                "ok": 2,
+                "partial": 0,
+                "failed": 0,
+                "new_messages": 2,
+                "results": {
+                    1: {"name": "ChatA", "new": 2, "status": "complete", "error": None},
+                    2: {"name": "ChatB", "new": 0, "status": "complete", "error": None},
+                },
+            }
 
         monkeypatch.setattr(tg_mod, "sync_all_dialogs", fake_sync_all_dialogs)
         result = runner.invoke(cli, ["refresh", "--yaml"])
         assert result.exit_code == 0
         data = yaml.safe_load(result.output)["data"]
         assert data["new_messages"] == 2
-        assert data["updated_chats"] == ["ChatA"]
+        assert data["failed"] == 0
+        assert data["enumerated"] is True
 
 
 class TestStatus:
@@ -702,7 +715,7 @@ class TestHistory:
         monkeypatch.setattr(db_mod, "get_db_path", lambda: db_path)
 
         async def fake_fetch_history(client, chat, limit=1000, db=None, on_progress=None):
-            return 42
+            return {"stored": 42, "seen": 42, "status": "complete", "error": None}
 
         @asynccontextmanager
         async def fake_connect():

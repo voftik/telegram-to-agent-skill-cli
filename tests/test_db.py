@@ -356,8 +356,8 @@ class TestMigrationV2:
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             ).fetchall()
         }
-        assert {"messages", "attachments", "links", "messages_fts"} <= tables
-        assert db.conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert {"messages", "attachments", "links", "messages_fts", "sync_gaps"} <= tables
+        assert db.conn.execute("PRAGMA user_version").fetchone()[0] == 3
 
     def test_migrates_old_db_with_data(self, tmp_path):
         """A v1 database (upstream schema) migrates in place, keeping rows."""

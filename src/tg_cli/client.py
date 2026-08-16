@@ -184,6 +184,124 @@ async def get_chat_info(client: TelegramClient, chat: str | int) -> dict | None:
     return info
 
 
+class _Ingest:
+    """Shared message-processing pipeline for history fetches and gap fills.
+
+    Batches are committed as iteration goes, so everything processed before
+    an interruption is already durable — the caller only needs to record the
+    unfetched remainder as a gap cursor.
+    """
+
+    BATCH_SIZE = 200
+
+    def __init__(self, db: MessageDB, chat_id: int, chat_name: str):
+        self.db = db
+        self.chat_id = chat_id
+        self.chat_name = chat_name
+        self.sender_cache: dict[int, str] = {}
+        self.batch: list[dict] = []
+        self.att_batch: list[dict] = []
+        self.link_batch: list[dict] = []
+        self.stored = 0
+        self.seen = 0
+        self.oldest_seen: int | None = None
+
+    def add(self, msg) -> bool:
+        """Process one message; returns True when a batch was flushed."""
+        self.seen += 1
+        self.oldest_seen = msg.id  # newest-first iteration: last seen = oldest
+
+        meta = extract_message_meta(msg)
+        # Media-only messages (a file without caption) must be kept;
+        # service messages (no text, no media) are skipped.
+        if msg.text is None and msg.message is None and not meta["has_media"]:
+            return False
+
+        sender_name = None
+        if msg.sender_id:
+            if msg.sender_id in self.sender_cache:
+                sender_name = self.sender_cache[msg.sender_id]
+            else:
+                # Telethon caches sender in msg._sender from the response
+                cached = getattr(msg, "_sender", None) or getattr(msg, "sender", None)
+                if cached:
+                    sender_name = _get_sender_name(cached)
+                if sender_name:
+                    self.sender_cache[msg.sender_id] = sender_name
+
+        content = msg.text or msg.message or ""
+        ts = msg.date
+        if ts and ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+
+        self.batch.append(
+            dict(
+                chat_id=self.chat_id,
+                chat_name=self.chat_name,
+                msg_id=msg.id,
+                sender_id=msg.sender_id,
+                sender_name=sender_name,
+                content=content,
+                timestamp=ts or datetime.now(timezone.utc),
+                reply_to_msg_id=meta["reply_to_msg_id"],
+                has_media=meta["has_media"],
+            )
+        )
+        if meta["attachment"]:
+            self.att_batch.append(dict(chat_id=self.chat_id, msg_id=msg.id, **meta["attachment"]))
+        for link in meta["links"]:
+            self.link_batch.append(dict(chat_id=self.chat_id, msg_id=msg.id, **link))
+
+        if len(self.batch) >= self.BATCH_SIZE:
+            self.flush()
+            return True
+        return False
+
+    def flush(self) -> None:
+        if self.batch:
+            self.stored += self.db.insert_batch(self.batch)
+            self.batch.clear()
+        self.db.insert_attachments(self.att_batch)
+        self.db.insert_links(self.link_batch)
+        self.att_batch.clear()
+        self.link_batch.clear()
+
+
+async def _ingest_range(
+    client: TelegramClient,
+    entity,
+    ingest: _Ingest,
+    *,
+    limit: int,
+    min_id: int = 0,
+    max_id: int = 0,
+    on_progress: Callable[[int], None] | None = None,
+    batch_delay: float = 0,
+) -> str | None:
+    """Run one newest-first pass over a message range. Returns an error string
+    (FloodWait included) or None; everything fetched so far is committed."""
+    try:
+        async for msg in client.iter_messages(entity, limit=limit, min_id=min_id, max_id=max_id):
+            flushed = ingest.add(msg)
+            if flushed:
+                if on_progress:
+                    on_progress(ingest.stored)
+                # Anti-ban: throttle between pagination batches
+                if batch_delay > 0:
+                    jitter = batch_delay * random.uniform(-0.3, 0.3)
+                    await asyncio.sleep(batch_delay + jitter)
+        return None
+    except FloodWaitError as e:
+        console.print(f"[yellow]⚠ Telegram rate limit hit, waiting {e.seconds}s...[/yellow]")
+        await asyncio.sleep(e.seconds + random.uniform(1, 3))
+        return f"flood_wait:{e.seconds}"
+    except Exception as e:
+        log.warning("history fetch interrupted for %s: %s", ingest.chat_name, e)
+        return str(e)
+    finally:
+        ingest.flush()
+
+
 async def fetch_history(
     client: TelegramClient,
     chat: str | int,
@@ -192,111 +310,140 @@ async def fetch_history(
     on_progress: Callable[[int], None] | None = None,
     min_id: int = 0,
     batch_delay: float = 0,
-) -> int:
-    """Fetch historical messages from a chat and store them in the database.
+) -> dict:
+    """Fetch history newest-first and store it, gap-safely.
 
-    Args:
-        client: Connected TelegramClient instance
-        chat: Group name, username, or numeric ID
-        limit: Max messages to fetch
-        db: Database instance (creates one if None)
-        on_progress: Callback invoked every batch with current count
-        min_id: Only fetch messages with id > min_id (for incremental sync)
-        batch_delay: Seconds to sleep between DB write batches (with ±30% jitter).
-            Throttles iter_messages pagination. Set to 0 to disable.
+    When the pass cannot cover the whole (min_id, newest] range — the limit
+    was hit, or an error/FloodWait interrupted iteration — the unfetched
+    remainder is recorded in sync_gaps so a later pass can heal it. A capped
+    *first* sync (min_id=0) records a 'backfill' cursor instead: older
+    history is reachable via `tg backfill`, but is not an integrity hole.
+
+    Returns {"stored", "seen", "status": complete|partial|failed, "error"}.
     """
     owns_db = db is None
     if db is None:
         db = MessageDB()
 
     try:
-        entity = await client.get_entity(chat)
+        try:
+            entity = await client.get_entity(chat)
+        except Exception as e:
+            return {"stored": 0, "seen": 0, "status": "failed", "error": str(e)}
         chat_name = (
             getattr(entity, "title", None) or getattr(entity, "first_name", None) or str(chat)
         )
         chat_id = entity.id
 
-        # Lazy sender name resolution — avoids risky iter_participants API
-        sender_cache: dict[int, str] = {}
+        ingest = _Ingest(db, chat_id, chat_name)
+        error = await _ingest_range(
+            client,
+            entity,
+            ingest,
+            limit=limit,
+            min_id=min_id,
+            on_progress=on_progress,
+            batch_delay=batch_delay,
+        )
 
-        batch: list[dict] = []
-        inserted_count = 0
-        BATCH_SIZE = 200
+        status = "complete"
+        if error is not None:
+            status = "failed" if not error.startswith("flood_wait") else "partial"
+        gap_kind = "backfill" if min_id == 0 else "gap"
+        if ingest.oldest_seen is not None and (error is not None or ingest.seen >= limit):
+            # Remainder (min_id, oldest_seen) was not fetched this pass.
+            if db.record_gap(chat_id, min_id, ingest.oldest_seen, kind=gap_kind):
+                if error is None and gap_kind == "gap":
+                    status = "partial"
 
-        att_batch: list[dict] = []
-        link_batch: list[dict] = []
-
-        async for msg in client.iter_messages(entity, limit=limit, min_id=min_id):
-            meta = extract_message_meta(msg)
-            # Media-only messages (a file without caption) must be kept;
-            # service messages (no text, no media) are skipped.
-            if msg.text is None and msg.message is None and not meta["has_media"]:
-                continue
-
-            # Extract sender name from Telethon's cached _sender (zero API calls)
-            sender_name = None
-            if msg.sender_id:
-                if msg.sender_id in sender_cache:
-                    sender_name = sender_cache[msg.sender_id]
-                else:
-                    # Telethon caches sender in msg._sender from the response
-                    cached = getattr(msg, "_sender", None) or getattr(msg, "sender", None)
-                    if cached:
-                        sender_name = _get_sender_name(cached)
-                    if sender_name:
-                        sender_cache[msg.sender_id] = sender_name
-
-            content = msg.text or msg.message or ""
-            ts = msg.date
-            if ts and ts.tzinfo is None:
-                ts = ts.replace(tzinfo=timezone.utc)
-
-            batch.append(
-                dict(
-                    chat_id=chat_id,
-                    chat_name=chat_name,
-                    msg_id=msg.id,
-                    sender_id=msg.sender_id,
-                    sender_name=sender_name,
-                    content=content,
-                    timestamp=ts or datetime.now(timezone.utc),
-                    reply_to_msg_id=meta["reply_to_msg_id"],
-                    has_media=meta["has_media"],
-                )
-            )
-            if meta["attachment"]:
-                att_batch.append(dict(chat_id=chat_id, msg_id=msg.id, **meta["attachment"]))
-            for link in meta["links"]:
-                link_batch.append(dict(chat_id=chat_id, msg_id=msg.id, **link))
-
-            if len(batch) >= BATCH_SIZE:
-                inserted_count += db.insert_batch(batch)
-                db.insert_attachments(att_batch)
-                db.insert_links(link_batch)
-                batch.clear()
-                att_batch.clear()
-                link_batch.clear()
-                if on_progress:
-                    on_progress(inserted_count)
-                # Anti-ban: throttle between pagination batches
-                if batch_delay > 0:
-                    jitter = batch_delay * random.uniform(-0.3, 0.3)
-                    await asyncio.sleep(batch_delay + jitter)
-
-        # Flush remaining
-        if batch:
-            inserted_count += db.insert_batch(batch)
-        db.insert_attachments(att_batch)
-        db.insert_links(link_batch)
-
-        return inserted_count
-    except FloodWaitError as e:
-        console.print(f"[yellow]⚠ Telegram rate limit hit, waiting {e.seconds}s...[/yellow]")
-        await asyncio.sleep(e.seconds + random.uniform(1, 3))
-        return 0
+        return {"stored": ingest.stored, "seen": ingest.seen, "status": status, "error": error}
     finally:
         if owns_db:
             db.close()
+
+
+async def fill_gaps(
+    client: TelegramClient,
+    db: MessageDB,
+    chat: str | int,
+    *,
+    kind: str = "gap",
+    limit: int = 2000,
+    batch_delay: float = 0,
+) -> dict:
+    """Heal recorded gap/backfill cursors for one chat.
+
+    Each cursor is consumed newest-first inside its (from_id, to_id) window;
+    a partial fill shrinks the cursor so no progress is ever lost.
+
+    Returns {"stored", "closed", "remaining", "error"}.
+    """
+    try:
+        entity = await client.get_entity(chat)
+    except Exception as e:
+        return {"stored": 0, "closed": 0, "remaining": -1, "error": str(e)}
+    chat_id = entity.id
+    chat_name = getattr(entity, "title", None) or getattr(entity, "first_name", None) or str(chat)
+
+    stored = 0
+    closed = 0
+    error = None
+    for gap in db.get_gaps(chat_id=chat_id, kind=kind):
+        ingest = _Ingest(db, chat_id, chat_name)
+        error = await _ingest_range(
+            client,
+            entity,
+            ingest,
+            limit=limit,
+            min_id=gap["from_id"],
+            max_id=gap["to_id"],
+            batch_delay=batch_delay,
+        )
+        stored += ingest.stored
+        if error is None and ingest.seen < limit:
+            db.delete_gap(gap["id"])  # window exhausted — gap closed
+            closed += 1
+        elif ingest.oldest_seen is not None:
+            db.shrink_gap(gap["id"], ingest.oldest_seen)
+        if error is not None:
+            break
+    return {
+        "stored": stored,
+        "closed": closed,
+        "remaining": db.count_gaps(kind=kind, chat_id=chat_id),
+        "error": error,
+    }
+
+
+_WINDOWS_RESERVED = {
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+}
+
+
+def safe_attachment_filename(
+    msg_id: int,
+    raw_name: str | None,
+    kind: str,
+    mime_type: str | None,
+) -> str:
+    """Build a filesystem-safe name for a server-supplied attachment name.
+
+    Telegram file names are attacker-controlled: they may contain path
+    separators, `..`, absolute paths, control characters or Windows
+    reserved names. The result is always a plain basename.
+    """
+    import mimetypes
+    import re
+
+    name = (raw_name or "").replace("\\", "/").split("/")[-1]
+    name = re.sub(r'[<>:"|?*\x00-\x1f]', "_", name).strip().lstrip(".")
+    stem = name.split(".")[0].upper()
+    if not name or stem in _WINDOWS_RESERVED:
+        ext = mimetypes.guess_extension(mime_type or "") or ""
+        name = f"{kind}_{msg_id}{ext}"
+    return f"{msg_id}_{name}"[:200]
 
 
 async def download_attachments(
@@ -317,7 +464,6 @@ async def download_attachments(
     re-running never duplicates work.
     """
     import hashlib
-    import mimetypes
     from pathlib import Path
 
     from .config import get_data_dir
@@ -356,11 +502,20 @@ async def download_attachments(
             row = by_id.get(msg.id)
             if row is None:
                 continue
-            base = row["file_name"]
-            if not base:
-                ext = mimetypes.guess_extension(row["mime_type"] or "") or ""
-                base = f"{row['kind']}_{msg.id}{ext}"
-            target = files_dir / f"{msg.id}_{base}"
+            name = safe_attachment_filename(
+                msg.id, row["file_name"], row["kind"], row["mime_type"]
+            )
+            target = files_dir / name
+            # Belt and braces: never write outside this chat's directory,
+            # never silently overwrite an existing file.
+            if not target.resolve().is_relative_to(files_dir.resolve()):
+                log.warning("attachment path escapes files dir, skipping: %r", name)
+                continue
+            stem, dot, ext = name.partition(".")
+            counter = 1
+            while target.exists():
+                target = files_dir / f"{stem}~{counter}{dot}{ext}"
+                counter += 1
             try:
                 saved = await client.download_media(msg, file=str(target))
             except FloodWaitError as e:
@@ -414,10 +569,27 @@ async def sync_all(
             Set to 0 to disable. Helps avoid triggering Telegram rate limits.
         max_chats: Max number of chats to sync per run. None = no limit.
 
-    Returns:
-        dict mapping chat_name to new message count
+    Returns a pass report; "results" is keyed by chat_id:
+        {
+          "enumerated": bool,     # dialog listing itself succeeded
+          "error": str | None,    # enumeration error when not enumerated
+          "total": int, "ok": int, "partial": int, "failed": int,
+          "new_messages": int,
+          "results": {chat_id: {"name", "new", "status", "error"}},
+        }
+    A pass proves nothing when "enumerated" is False or "failed" > 0 —
+    callers (bootstrap) must not treat such a pass as a completed sync.
     """
-    results: dict[str, int] = {}
+    report: dict = {
+        "enumerated": False,
+        "error": None,
+        "total": 0,
+        "ok": 0,
+        "partial": 0,
+        "failed": 0,
+        "new_messages": 0,
+        "results": {},
+    }
     stored_chats = {c["chat_id"]: c for c in db.get_chats()}
     dialog_cache: dict[int, tuple[object, str]] = {}
     try:
@@ -425,12 +597,16 @@ async def sync_all(
             entity = dialog.entity
             dialog_cache[entity.id] = (entity, dialog.name)
     except Exception as e:
-        log.debug("Failed to build dialog cache: %s", e)
+        # A failed enumeration must never look like an empty-but-successful
+        # pass (#19) — report it explicitly.
+        report["error"] = f"dialog enumeration failed: {e}"
+        return report
+    report["enumerated"] = True
 
     items = list(dialog_cache.items())
     if max_chats is not None:
         items = items[:max_chats]
-    total = len(items)
+    report["total"] = len(items)
 
     for idx, (chat_id, (entity, dialog_name)) in enumerate(items):
         chat_info = stored_chats.get(chat_id, {})
@@ -443,33 +619,51 @@ async def sync_all(
             effective_limit = _FIRST_SYNC_LIMIT
             log.debug("First sync for %s, limiting to %d messages", chat_name, effective_limit)
 
+        new_count = 0
         try:
-            count = await fetch_history(
+            # Heal integrity gaps left by earlier capped/interrupted passes
+            # before advancing the checkpoint further (#22).
+            if db.count_gaps(kind="gap", chat_id=chat_id):
+                gap_res = await fill_gaps(client, db, entity, limit=effective_limit)
+                new_count += gap_res["stored"]
+                if gap_res["error"]:
+                    raise RuntimeError(gap_res["error"])
+
+            res = await fetch_history(
                 client,
                 entity,
                 limit=effective_limit,
                 db=db,
                 min_id=last_id,
             )
-            results[chat_name] = count
-            if on_chat_done:
-                on_chat_done(chat_name, count, chat_info.get("msg_count", 0) + count)
-        except FloodWaitError as e:
-            console.print(
-                f"  [yellow]⚠ {chat_name}: rate limited, waiting {e.seconds}s...[/yellow]"
-            )
-            await asyncio.sleep(e.seconds + random.uniform(1, 3))
-            results[chat_name] = 0
+            new_count += res["stored"]
+            status = res["status"]
+            error = res["error"]
         except Exception as e:
+            status = "failed"
+            error = str(e)
             console.print(f"  [red]✗ {chat_name}: {e}[/red]")
-            results[chat_name] = 0
+
+        report["results"][chat_id] = {
+            "name": chat_name,
+            "new": new_count,
+            "status": status,
+            "error": error,
+        }
+        report["new_messages"] += new_count
+        key = status if status in ("ok", "partial", "failed") else "ok"
+        if status == "complete":
+            key = "ok"
+        report[key] += 1
+        if on_chat_done and status != "failed":
+            on_chat_done(chat_name, new_count, chat_info.get("msg_count", 0) + new_count)
 
         # Anti-ban: sleep with random jitter between chat syncs
-        if delay > 0 and idx < total - 1:
+        if delay > 0 and idx < report["total"] - 1:
             jitter = delay * random.uniform(-0.2, 0.2)
             await asyncio.sleep(delay + jitter)
 
-    return results
+    return report
 
 
 async def listen(

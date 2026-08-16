@@ -88,16 +88,25 @@ def tg_history(chat: str, limit: int, as_json: bool, as_yaml: bool):
                     def on_progress(count: int):
                         progress.update(task, description=f"Stored {count} messages...")
 
-                    count = await fetch_history(
+                    result = await fetch_history(
                         client, _parse_chat(chat), limit=limit, db=db, on_progress=on_progress
                     )
-                return count
+                return result
 
-    count = asyncio.run(_run())
-    payload = {"stored": count, "chat": chat}
+    res = asyncio.run(_run())
+    payload = {"stored": res["stored"], "status": res["status"], "chat": chat}
+    if res["error"]:
+        payload["error"] = res["error"]
     if emit_structured(payload, as_json=as_json, as_yaml=as_yaml):
+        if res["status"] == "failed":
+            raise SystemExit(1)
         return
-    console.print(f"\n[green]\u2713[/green] Stored {count} messages from {chat}")
+    console.print(f"\n[green]\u2713[/green] Stored {res['stored']} messages from {chat}")
+    if res["status"] != "complete":
+        detail = res["error"] or "gap recorded"
+        console.print(f"[yellow]status: {res['status']} \u2014 {detail}[/yellow]")
+        if res["status"] == "failed":
+            raise SystemExit(1)
 
 
 @tg_group.command("sync")
@@ -131,13 +140,20 @@ def tg_sync(chat: str, limit: int, as_json: bool, as_yaml: bool):
 
             return await sync_chat_dialog(chat, limit=limit, on_progress=on_progress)
 
-    count = asyncio.run(_run())
-    if count is None:
+    res = asyncio.run(_run())
+    if res is None:
         return
-    payload = {"synced": count, "chat": chat}
+    payload = {"synced": res["stored"], "status": res["status"], "chat": chat}
+    if res["error"]:
+        payload["error"] = res["error"]
     if emit_structured(payload, as_json=as_json, as_yaml=as_yaml):
+        if res["status"] == "failed":
+            raise SystemExit(1)
         return
-    console.print(f"\n[green]\u2713[/green] Synced {count} new messages from {chat}")
+    console.print(f"\n[green]\u2713[/green] Synced {res['stored']} new messages from {chat}")
+    if res["status"] == "failed":
+        console.print(f"[red]sync failed: {res['error']}[/red]")
+        raise SystemExit(1)
 
 
 @tg_group.command("sync-all")
@@ -175,12 +191,33 @@ def tg_sync_all(limit: int, delay: float, max_chats: int | None, as_json: bool, 
             limit=limit, on_chat_done=on_chat_done, delay=delay, max_chats=max_chats
         )
 
-    results = asyncio.run(_run())
-    total_new = sum(results.values())
-    payload = {"new_messages": total_new, "chats": len(results), "results": results}
-    if emit_structured(payload, as_json=as_json, as_yaml=as_yaml):
+    report = asyncio.run(_run())
+    _finish_sync_report(report, as_json=as_json, as_yaml=as_yaml)
+
+
+def _finish_sync_report(report: dict, *, as_json: bool, as_yaml: bool) -> None:
+    """Emit a sync_all pass report and exit non-zero on failures (#19)."""
+    ok_pass = report["enumerated"] and report["failed"] == 0
+    failed_chats = {
+        cid: r for cid, r in report["results"].items() if r["status"] == "failed"
+    }
+    if emit_structured(report, as_json=as_json, as_yaml=as_yaml):
+        if not ok_pass:
+            raise SystemExit(1)
         return
-    console.print(f"\n[green]✓[/green] Synced {total_new} new messages across {len(results)} chats")
+
+    if not report["enumerated"]:
+        console.print(f"[red]✗ {report['error']}[/red]")
+        raise SystemExit(1)
+    console.print(
+        f"\n[green]✓[/green] Synced {report['new_messages']} new messages across "
+        f"{report['total']} chats (ok: {report['ok']}, partial: {report['partial']},"
+        f" failed: {report['failed']})"
+    )
+    for r in list(failed_chats.values())[:10]:
+        console.print(f"  [red]✗ {r['name']}: {r['error']}[/red]")
+    if not ok_pass:
+        raise SystemExit(1)
 
 
 @tg_group.command("refresh")
@@ -218,25 +255,40 @@ def tg_refresh(limit: int, delay: float, max_chats: int | None, as_json: bool, a
             limit=limit, on_chat_done=on_chat_done, delay=delay, max_chats=max_chats
         )
 
-    results = asyncio.run(_run())
-    total_new = sum(results.values())
-    updated = [
-        name
-        for name, count in sorted(results.items(), key=lambda item: (-item[1], item[0]))
-        if count > 0
-    ]
-    payload = {
-        "new_messages": total_new,
-        "chats": len(results),
-        "updated_chats": updated,
-        "results": results,
-    }
-    if emit_structured(payload, as_json=as_json, as_yaml=as_yaml):
-        return
+    report = asyncio.run(_run())
+    _finish_sync_report(report, as_json=as_json, as_yaml=as_yaml)
 
-    console.print(f"\n[green]✓[/green] Refreshed {len(results)} chats, {total_new} new messages.")
-    if updated:
-        console.print(f"[dim]Most recently updated: {', '.join(updated[:5])}[/dim]")
+
+@tg_group.command("backfill")
+@click.argument("chat")
+@click.option("-n", "--limit", default=2000, show_default=True, help="Messages per run")
+@structured_output_options
+def tg_backfill(chat: str, limit: int, as_json: bool, as_yaml: bool):
+    """Pull history older than the first sync captured (consumes backfill cursors).
+
+    The first sync of a big chat stores its newest messages and records a
+    backfill cursor. Run this (repeatedly, if needed) to walk the history
+    all the way back without ever creating gaps.
+    """
+    from ._sync import backfill_chat_dialog
+
+    res = asyncio.run(backfill_chat_dialog(chat, limit=limit))
+    if emit_structured(res, as_json=as_json, as_yaml=as_yaml):
+        if res["error"]:
+            raise SystemExit(1)
+        return
+    if res["error"]:
+        console.print(f"[red]✗ backfill failed: {res['error']}[/red]")
+        raise SystemExit(1)
+    if res["closed"] and not res["remaining"]:
+        console.print(f"[green]✓[/green] History complete: +{res['stored']} messages")
+    elif res["remaining"]:
+        console.print(
+            f"[green]✓[/green] +{res['stored']} messages, older history remains —"
+            " run again to continue"
+        )
+    else:
+        console.print("[dim]Nothing to backfill for this chat.[/dim]")
 
 
 @tg_group.command("listen")
@@ -520,15 +572,36 @@ def tg_bootstrap_run():
     async def _pass():
         async with connect() as client:
             with MessageDB() as db:
-                return await sync_all(client, db, limit_per_chat=limit, delay=delay)
+                report = await sync_all(client, db, limit_per_chat=limit, delay=delay)
+                gaps_left = db.count_gaps(kind="gap")
+                return report, gaps_left
 
     try:
-        results = asyncio.run(_pass())
+        report, gaps_left = asyncio.run(_pass())
     except Exception as e:
         console.print(f"bootstrap pass failed, will retry: {e}")
         raise SystemExit(1) from None
 
-    console.print(f"bootstrap pass complete: {len(results)} chats")
+    # A pass only counts when it is *provably* complete (#19): dialogs were
+    # enumerated, no chat failed, and no integrity gaps remain.
+    complete = (
+        report["enumerated"]
+        and report["total"] > 0
+        and report["failed"] == 0
+        and gaps_left == 0
+    )
+    if not complete:
+        console.print(
+            "bootstrap pass incomplete, will retry: "
+            f"enumerated={report['enumerated']} total={report['total']} "
+            f"failed={report['failed']} gaps={gaps_left} error={report['error']}"
+        )
+        raise SystemExit(1)
+
+    console.print(
+        f"bootstrap pass complete: {report['total']} chats, "
+        f"+{report['new_messages']} messages"
+    )
     bs.clear_marker()
     bs.uninstall_autostart()
 

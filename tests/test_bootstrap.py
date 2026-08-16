@@ -85,7 +85,16 @@ class TestRun:
         async def fake_sync_all(client, db, limit_per_chat, delay):
             assert limit_per_chat == 10
             assert delay == 0
-            return {"chat": 5}
+            return {
+                "enumerated": True,
+                "error": None,
+                "total": 1,
+                "ok": 1,
+                "partial": 0,
+                "failed": 0,
+                "new_messages": 5,
+                "results": {1: {"name": "chat", "new": 5, "status": "complete", "error": None}},
+            }
 
         import tg_cli.client as client_mod
 
