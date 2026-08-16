@@ -1,0 +1,50 @@
+<svg width="1200" height="280" viewBox="0 0 1200 280" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="telegram-to-agent-skill-cli">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b1220"/>
+      <stop offset="1" stop-color="#16233b"/>
+    </linearGradient>
+    <linearGradient id="tgblue" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2AABEE"/>
+      <stop offset="1" stop-color="#229ED9"/>
+    </linearGradient>
+    <linearGradient id="glow" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#2AABEE" stop-opacity="0"/>
+      <stop offset="0.5" stop-color="#2AABEE" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#2AABEE" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1200" height="280" rx="18" fill="url(#bg)"/>
+  <rect x="0" y="276" width="1200" height="4" fill="url(#glow)"/>
+
+  <!-- Telegram-blue app tile with paper plane -->
+  <rect x="72" y="66" width="148" height="148" rx="34" fill="url(#tgblue)"/>
+  <path d="M104 144 L188 106 L172 178 C171 183 166 185 161 182 L143 168 L132 179 C130 181 126 180 126 176 L127 158 Z"
+        fill="#ffffff"/>
+  <path d="M127 158 L188 106 L143 168 L132 179 C130 181 126 180 126 176 Z"
+        fill="#d7ecfa"/>
+
+  <!-- Title and tagline -->
+  <text x="260" y="126" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif"
+        font-size="42" font-weight="700" fill="#f1f5f9">telegram-to-agent-skill-cli</text>
+  <text x="260" y="168" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif"
+        font-size="22" fill="#94a3b8">Your Telegram chats, as context for coding agents</text>
+
+  <!-- Chips -->
+  <g font-family="SF Mono, Menlo, Consolas, monospace" font-size="15">
+    <rect x="260" y="192" width="118" height="32" rx="16" fill="#1e3a5f"/>
+    <text x="319" y="213" text-anchor="middle" fill="#7dd3fc">Claude Code</text>
+    <rect x="390" y="192" width="76" height="32" rx="16" fill="#1e3a5f"/>
+    <text x="428" y="213" text-anchor="middle" fill="#7dd3fc">Codex</text>
+    <rect x="478" y="192" width="140" height="32" rx="16" fill="#1e3a5f"/>
+    <text x="548" y="213" text-anchor="middle" fill="#7dd3fc">any CLI agent</text>
+  </g>
+
+  <!-- Decorative prompt on the right -->
+  <g font-family="SF Mono, Menlo, Consolas, monospace">
+    <text x="860" y="120" font-size="26" fill="#334155">$ tg search "launch*"</text>
+    <text x="860" y="156" font-size="26" fill="#334155">$ tg files --download</text>
+    <text x="860" y="192" font-size="26" fill="#2AABEE" opacity="0.8">$ tg brief "Team chat"</text>
+  </g>
+</svg>

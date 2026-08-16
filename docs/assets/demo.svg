@@ -1,0 +1,54 @@
+<svg width="940" height="600" viewBox="0 0 940 600" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Agent session demo">
+  <defs>
+    <linearGradient id="term" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0d1526"/>
+      <stop offset="1" stop-color="#0a101d"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="940" height="600" rx="16" fill="url(#term)" stroke="#1e2a44" stroke-width="1"/>
+
+  <!-- Title bar -->
+  <circle cx="30" cy="28" r="7" fill="#ff5f57"/>
+  <circle cx="54" cy="28" r="7" fill="#febc2e"/>
+  <circle cx="78" cy="28" r="7" fill="#28c840"/>
+  <text x="470" y="33" text-anchor="middle" font-family="SF Mono, Menlo, Consolas, monospace"
+        font-size="14" fill="#475569">agent session</text>
+  <line x1="0" y1="52" x2="940" y2="52" stroke="#1e2a44" stroke-width="1"/>
+
+  <g font-family="SF Mono, Menlo, Consolas, monospace" font-size="16">
+    <text x="36" y="96" fill="#f8fafc" font-weight="600">you ›</text>
+    <text x="104" y="96" fill="#e2e8f0">what did the team discuss in our project chat this week?</text>
+
+    <text x="36" y="140" fill="#a78bfa" font-weight="600">agent ›</text>
+    <text x="128" y="140" fill="#94a3b8">using the tg skill…</text>
+
+    <text x="60" y="180" fill="#64748b">$</text>
+    <text x="80" y="180" fill="#e2e8f0">tg sync "Project X"</text>
+    <text x="420" y="180" fill="#4ade80">✓ 143 new messages</text>
+
+    <text x="60" y="212" fill="#64748b">$</text>
+    <text x="80" y="212" fill="#e2e8f0">tg brief "Project X"</text>
+    <text x="420" y="212" fill="#4ade80">✓ 7d: 291 msgs · 12 files · 8 links</text>
+
+    <text x="60" y="244" fill="#64748b">$</text>
+    <text x="80" y="244" fill="#e2e8f0">tg links "Project X" --kind gdoc</text>
+    <text x="420" y="244" fill="#4ade80">✓ pricing doc → export?format=txt</text>
+
+    <text x="60" y="276" fill="#64748b">$</text>
+    <text x="80" y="276" fill="#e2e8f0">tg files "Project X" --download --type document</text>
+    <text x="60" y="308" fill="#4ade80">  ✓ checklist.xlsx → checklist.xlsx.txt</text>
+
+    <text x="36" y="356" fill="#7dd3fc" font-weight="600">Summary — Aug 9–16 (143 messages)</text>
+    <text x="36" y="392" fill="#e2e8f0">• Release moved to Sep 2</text>
+    <text x="330" y="392" fill="#64748b">(Kate, Aug 14 — QA found a blocker)</text>
+    <text x="36" y="424" fill="#e2e8f0">• New pricing approved; doc read via export link</text>
+    <text x="36" y="456" fill="#e2e8f0">• Deploy checklist parsed — 3 items still open</text>
+    <text x="36" y="488" fill="#fbbf24">⚠ needs your reply: Alex asks about the API quota</text>
+    <text x="530" y="488" fill="#64748b">(msg 4182)</text>
+
+    <text x="36" y="536" fill="#a78bfa" font-weight="600">agent ›</text>
+    <text x="128" y="536" fill="#94a3b8">draft a reply? I'll show it first — nothing is sent</text>
+    <text x="128" y="562" fill="#94a3b8">without your explicit yes (tg send --confirm).</text>
+  </g>
+</svg>
