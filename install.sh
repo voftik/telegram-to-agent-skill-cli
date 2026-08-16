@@ -74,6 +74,6 @@ cat <<'NEXT'
 
 Next steps if this is a fresh machine:
   1. Fill TG_API_ID / TG_API_HASH in the .env above
-  2. tg whoami        # phone -> code from Telegram -> 2FA
-  3. tg refresh       # initial sync (long on big accounts)
+  2. tg whoami             # phone -> code from Telegram -> 2FA
+  3. tg bootstrap start    # initial sync: survives reboots, removes itself when done
 NEXT

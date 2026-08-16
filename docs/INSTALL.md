@@ -39,8 +39,11 @@ nano ~/Library/Application\ Support/tg-cli/.env   # TG_API_ID, TG_API_HASH
 # 2. Авторизация: телефон → код в приложении Telegram → пароль 2FA
 tg whoami
 
-# 3. Первичный синк (на большом аккаунте — часы; можно в фоне)
-nohup tg refresh --delay 2 > ~/Library/Application\ Support/tg-cli/refresh.log 2>&1 &
+# 3. Первичный синк (на большом аккаунте — часы). Команда сама ставит
+#    себя в автозагрузку, переживает перезагрузки и сбои, а после первого
+#    полного прохода снимает себя с дежурства:
+tg bootstrap start
+# прогресс: tg bootstrap status · лог: <data>/bootstrap.log · отмена: tg bootstrap stop
 
 # 4. Проверка
 tg status

@@ -473,6 +473,101 @@ def _log_sent(chat: str, msg_id: int, message: str) -> None:
         console.print(f"[yellow]\u26a0 sent.log write failed: {e}[/yellow]")
 
 
+@tg_group.group("bootstrap")
+def tg_bootstrap():
+    """Reboot-resilient initial sync (arms itself, then removes itself)."""
+
+
+@tg_bootstrap.command("start")
+@click.option("--delay", default=2.0, show_default=True, help="Seconds between chat syncs")
+@click.option("-n", "--limit", default=5000, show_default=True, help="Max messages per chat")
+def tg_bootstrap_start(delay: float, limit: int):
+    """Arm the initial sync: starts now, auto-resumes after reboots,
+    uninstalls itself after one full successful pass over all dialogs."""
+    from .. import bootstrap as bs
+
+    bs.write_marker(delay, limit)
+    try:
+        where = bs.install_autostart()
+    except Exception as e:
+        bs.clear_marker()
+        console.print(f"[red]Autostart install failed: {e}[/red]")
+        raise SystemExit(1) from None
+    console.print(f"[green]✓[/green] Bootstrap armed: {where}")
+    console.print(
+        "[dim]Progress: tg bootstrap status · log: "
+        f"{bs.get_data_dir() / 'bootstrap.log'}[/dim]"
+    )
+
+
+@tg_bootstrap.command("run", hidden=True)
+def tg_bootstrap_run():
+    """Worker invoked by launchd/systemd. Not meant for humans."""
+    from .. import bootstrap as bs
+    from ..client import connect, sync_all
+    from ..db import MessageDB
+
+    state = bs.read_marker()
+    if state is None:
+        # Nothing pending — clean exit stops KeepAlive relaunches; make sure
+        # no stale autostart entry survives.
+        bs.uninstall_autostart()
+        return
+
+    delay = float(state.get("delay", 2.0))
+    limit = int(state.get("limit", 5000))
+
+    async def _pass():
+        async with connect() as client:
+            with MessageDB() as db:
+                return await sync_all(client, db, limit_per_chat=limit, delay=delay)
+
+    try:
+        results = asyncio.run(_pass())
+    except Exception as e:
+        console.print(f"bootstrap pass failed, will retry: {e}")
+        raise SystemExit(1) from None
+
+    console.print(f"bootstrap pass complete: {len(results)} chats")
+    bs.clear_marker()
+    bs.uninstall_autostart()
+
+
+@tg_bootstrap.command("status")
+@structured_output_options
+def tg_bootstrap_status(as_json: bool, as_yaml: bool):
+    """Is the bootstrap still pending, and is autostart armed?"""
+    from .. import bootstrap as bs
+    from ..db import MessageDB
+
+    state = bs.read_marker()
+    with MessageDB() as db:
+        payload = {
+            "pending": state is not None,
+            "autostart_installed": bs.autostart_installed(),
+            "options": state or {},
+            "messages_indexed": db.count(),
+            "chats_indexed": len(db.get_chats()),
+        }
+    if emit_structured(payload, as_json=as_json, as_yaml=as_yaml):
+        return
+    mark = "[green]armed[/green]" if payload["pending"] else "[dim]done / not armed[/dim]"
+    console.print(f"bootstrap: {mark} · autostart: {payload['autostart_installed']}")
+    console.print(
+        f"index: {payload['messages_indexed']} messages, {payload['chats_indexed']} chats"
+    )
+
+
+@tg_bootstrap.command("stop")
+def tg_bootstrap_stop():
+    """Disarm: remove the marker and the autostart entry."""
+    from .. import bootstrap as bs
+
+    bs.clear_marker()
+    bs.uninstall_autostart()
+    console.print("[green]✓[/green] Bootstrap disarmed.")
+
+
 @tg_group.command("files")
 @click.argument("chat")
 @click.option("--download", is_flag=True, help="Download pending files and extract text")
