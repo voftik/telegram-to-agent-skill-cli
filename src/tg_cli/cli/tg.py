@@ -432,41 +432,35 @@ def tg_whoami(as_json: bool, as_yaml: bool):
 @tg_group.command("status")
 @structured_output_options
 def tg_status(as_json: bool, as_yaml: bool):
-    """Show Telegram authentication status."""
+    """Show Telegram authentication status (non-interactive, never prompts)."""
+    from ..client import check_auth
 
-    async def _run():
-        async with connect() as client:
-            me = await client.get_me()
-            return {
-                "authenticated": True,
-                "id": me.id,
-                "first_name": me.first_name or "",
-                "last_name": me.last_name or "",
-                "username": me.username or "",
-                "phone": me.phone or "",
-            }
+    info = asyncio.run(check_auth())
 
-    fmt = default_structured_format(as_json=as_json, as_yaml=as_yaml)
-    try:
-        info = _run_async(_run())
-    except Exception as exc:
-        if fmt is not None:
-            click.echo(dump_structured(error_payload("auth_error", str(exc)), fmt=fmt))
-            raise SystemExit(1) from None
-        raise click.ClickException(str(exc)) from exc
-
-    user = {key: value for key, value in info.items() if key != "authenticated"}
-    if emit_structured(
-        success_payload({"authenticated": True, "user": user}),
-        as_json=as_json,
-        as_yaml=as_yaml,
-    ):
+    payload = {
+        "authenticated": info["authenticated"],
+        "reachable": info["reachable"],
+    }
+    if info["error"]:
+        payload["error"] = info["error"]
+    if info["authenticated"]:
+        payload["user"] = {
+            k: info[k] for k in ("id", "first_name", "last_name", "username", "phone")
+        }
+    if emit_structured(success_payload(payload), as_json=as_json, as_yaml=as_yaml):
         return
 
-    name = " ".join(part for part in [info["first_name"], info["last_name"]] if part).strip()
-    console.print(f"[green]✓[/green] Authenticated as [bold]{name or info['id']}[/bold]")
-    if info["username"]:
-        console.print(f"[dim]@{info['username']}[/dim]")
+    if info["authenticated"]:
+        name = " ".join(
+            part for part in [info["first_name"], info["last_name"]] if part
+        ).strip()
+        console.print(f"[green]✓[/green] Authenticated as [bold]{name or info['id']}[/bold]")
+        if info["username"]:
+            console.print(f"[dim]@{info['username']}[/dim]")
+    elif not info["reachable"]:
+        console.print(f"[yellow]⚠ Network unreachable: {info['error']}[/yellow]")
+    else:
+        console.print("[yellow]Not authenticated. Run `tg whoami` to sign in.[/yellow]")
 
 
 @tg_group.command("send")

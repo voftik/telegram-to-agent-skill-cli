@@ -8,24 +8,29 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-# Load .env from project root
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-
 
 def _load_env() -> None:
-    """Load .env from cwd, then the data directory, then the source checkout.
+    """Load configuration with a trust-ordered precedence (#29):
 
-    The data-dir candidate makes an installed CLI pick up credentials no
-    matter which directory an agent session runs it from.
+    1. process environment variables (always win — dotenv never overrides),
+    2. an explicitly opted-in file from $TG_ENV_FILE,
+    3. the trusted data-dir .env.
+
+    A .env lying in the current working directory is deliberately ignored:
+    a foreign project's file must not hijack DATA_DIR/DB_PATH/credentials
+    of a global CLI that agents run from arbitrary folders.
     """
+    if explicit := os.environ.get("TG_ENV_FILE", ""):
+        explicit_path = Path(explicit).expanduser()
+        if explicit_path.is_file():
+            load_dotenv(explicit_path)
+
     if raw_data_dir := os.environ.get("DATA_DIR", ""):
         data_env = Path(raw_data_dir).expanduser() / ".env"
     else:
         data_env = _default_data_home() / "tg-cli" / ".env"
-    for candidate in (Path.cwd() / ".env", data_env, _PROJECT_ROOT / ".env"):
-        if candidate.is_file():
-            load_dotenv(candidate)
-            return
+    if data_env.is_file():
+        load_dotenv(data_env)
 
 
 def _default_data_home() -> Path:

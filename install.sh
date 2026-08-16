@@ -68,8 +68,8 @@ SNIPPET
   fi
 fi
 
-step "5/5 Self-check"
-tg status --yaml 2>/dev/null | head -4 || echo "Session not authorized yet — run: tg whoami"
+step "5/5 Self-check (offline-safe, never prompts)"
+tg status --yaml | head -6 || true
 cat <<'NEXT'
 
 Next steps if this is a fresh machine:

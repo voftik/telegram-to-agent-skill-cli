@@ -35,6 +35,11 @@ jobs:
       - name: Run tests
         run: uv run python -m pytest -q
 
+      - name: Dependency audit (production graph)
+        run: |
+          uv export --no-dev --no-emit-project --format requirements-txt > /tmp/prod-reqs.txt
+          uvx pip-audit --strict -r /tmp/prod-reqs.txt
+
   build:
     name: Build package
     runs-on: ubuntu-latest

@@ -28,12 +28,15 @@ classifiers = [
 ]
 dependencies = [
     "telethon>=1.36",
-    "click>=8.0",
+    "click>=8.3.3",     # PYSEC-2026-2132
     "rich>=13.0",
     "python-dotenv>=1.0",
     "pyyaml>=6.0",
     "pypdf>=4.0",
     "openpyxl>=3.1",
+    # Security floors for transitive dependencies (audit #36):
+    "pyasn1>=0.6.4",    # PYSEC-2026-2263 (via telethon→rsa)
+    "pygments>=2.20.0",  # PYSEC-2026-2987 (via rich)
 ]
 
 [project.urls]

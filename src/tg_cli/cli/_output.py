@@ -36,10 +36,22 @@ def default_structured_format(*, as_json: bool, as_yaml: bool) -> str | None:
 
 
 def structured_output_options(command: Callable) -> Callable:
-    """Add --json/--yaml flags to a click command."""
-    command = click.option("--yaml", "as_yaml", is_flag=True, help="Output as YAML")(command)
-    command = click.option("--json", "as_json", is_flag=True, help="Output as JSON")(command)
-    return command
+    """Add --json/--yaml flags to a click command.
+
+    The flag conflict is rejected before the command body runs — a format
+    error must never happen after a message was sent or a file written (#27).
+    """
+    import functools
+
+    @functools.wraps(command)
+    def _preflight(*args, **kwargs):
+        if kwargs.get("as_json") and kwargs.get("as_yaml"):
+            raise click.UsageError("Use only one of --json or --yaml.")
+        return command(*args, **kwargs)
+
+    wrapped = click.option("--yaml", "as_yaml", is_flag=True, help="Output as YAML")(_preflight)
+    wrapped = click.option("--json", "as_json", is_flag=True, help="Output as JSON")(wrapped)
+    return wrapped
 
 
 def emit_structured(data: Any, *, as_json: bool, as_yaml: bool) -> bool:

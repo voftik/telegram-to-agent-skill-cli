@@ -107,6 +107,48 @@ async def connect() -> AsyncGenerator[TelegramClient, None]:
         await c.disconnect()
 
 
+async def check_auth() -> dict:
+    """Non-interactive authentication probe for `tg status` (#32).
+
+    Connects WITHOUT Telethon's start() so a missing session can never
+    prompt for phone/code — safe for installers and agents. Distinguishes
+    "not authorized" from "network unreachable".
+    """
+    c = TelegramClient(
+        get_session_path(),
+        get_api_id(),
+        get_api_hash(),
+        device_model=_DEVICE_MODEL,
+        system_version=_SYSTEM_VERSION,
+        app_version=_APP_VERSION,
+        lang_code=_LANG_CODE,
+        system_lang_code=_SYSTEM_LANG_CODE,
+    )
+    try:
+        await c.connect()
+    except Exception as e:
+        return {"authenticated": False, "reachable": False, "error": str(e)}
+    try:
+        if not await c.is_user_authorized():
+            return {"authenticated": False, "reachable": True, "error": None}
+        me = await c.get_me()
+        await _cache_me(c)
+        return {
+            "authenticated": True,
+            "reachable": True,
+            "error": None,
+            "id": me.id,
+            "first_name": me.first_name or "",
+            "last_name": me.last_name or "",
+            "username": me.username or "",
+            "phone": me.phone or "",
+        }
+    except Exception as e:
+        return {"authenticated": False, "reachable": True, "error": str(e)}
+    finally:
+        await c.disconnect()
+
+
 async def _cache_me(client: TelegramClient) -> None:
     """Best-effort cache of the account identity so offline commands
     (e.g. `tg style`) know the user's sender_id without connecting."""

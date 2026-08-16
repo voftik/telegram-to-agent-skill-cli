@@ -274,32 +274,58 @@ class TestRefreshAndSyncFirst:
 
 
 class TestStatus:
-    def test_status_yaml(self, runner, monkeypatch):
-        import tg_cli.cli.tg as tg_mod
+    def _patch_auth(self, monkeypatch, payload):
+        import tg_cli.client as client_mod
 
-        class FakeMe:
-            id = 123
-            first_name = "Alice"
-            last_name = "Smith"
-            username = "alice"
-            phone = "123456"
+        async def fake_check_auth():
+            return payload
 
-        class FakeClient:
-            async def get_me(self):
-                return FakeMe()
+        monkeypatch.setattr(client_mod, "check_auth", fake_check_auth)
 
-        @asynccontextmanager
-        async def fake_connect():
-            yield FakeClient()
-
-        monkeypatch.setattr(tg_mod, "connect", fake_connect)
+    def test_status_yaml_authenticated(self, runner, monkeypatch):
+        self._patch_auth(
+            monkeypatch,
+            {
+                "authenticated": True,
+                "reachable": True,
+                "error": None,
+                "id": 123,
+                "first_name": "Alice",
+                "last_name": "Smith",
+                "username": "alice",
+                "phone": "123456",
+            },
+        )
         result = runner.invoke(cli, ["status", "--yaml"])
         assert result.exit_code == 0
         data = yaml.safe_load(result.output)
         assert data["ok"] is True
-        assert data["schema_version"] == "1"
         assert data["data"]["authenticated"] is True
         assert data["data"]["user"]["username"] == "alice"
+
+    def test_status_unauthorized_is_clean_exit(self, runner, monkeypatch):
+        """No session → authenticated:false, exit 0, no prompt (#32)."""
+        self._patch_auth(
+            monkeypatch,
+            {"authenticated": False, "reachable": True, "error": None},
+        )
+        result = runner.invoke(cli, ["status", "--yaml"], input="")
+        assert result.exit_code == 0
+        data = yaml.safe_load(result.output)
+        assert data["data"]["authenticated"] is False
+        assert data["data"]["reachable"] is True
+        assert "phone" not in result.output.lower()
+
+    def test_status_network_error_distinguished(self, runner, monkeypatch):
+        self._patch_auth(
+            monkeypatch,
+            {"authenticated": False, "reachable": False, "error": "dns fail"},
+        )
+        result = runner.invoke(cli, ["status", "--yaml"])
+        assert result.exit_code == 0
+        data = yaml.safe_load(result.output)
+        assert data["data"]["reachable"] is False
+        assert data["data"]["error"] == "dns fail"
 
     def test_whoami_yaml(self, runner, monkeypatch):
         import tg_cli.cli.tg as tg_mod
@@ -800,3 +826,38 @@ class TestSendDryRun:
         log_text = (tmp_path / "sent.log").read_text()
         assert "TestChat" in log_text
         assert "Привет, лог!" in log_text
+
+
+class TestFormatConflictPreflight:
+    def test_conflict_rejected_before_send(self, runner, monkeypatch):
+        """--json --yaml must fail BEFORE any Telegram mutation (#27)."""
+        import tg_cli.cli.tg as tg_mod
+
+        calls = []
+
+        @asynccontextmanager
+        async def spy_connect():
+            calls.append("connect")
+            yield object()
+
+        monkeypatch.setattr(tg_mod, "connect", spy_connect)
+        result = runner.invoke(
+            cli, ["send", "Chat", "hello", "--confirm", "--json", "--yaml"]
+        )
+        assert result.exit_code == 2
+        assert "only one of" in result.output.lower()
+        assert calls == []  # no connection, no send
+
+    def test_conflict_rejected_before_sync(self, runner, monkeypatch):
+        import tg_cli.cli.tg as tg_mod
+
+        calls = []
+
+        async def spy_sync(*a, **kw):
+            calls.append("sync")
+            return {}
+
+        monkeypatch.setattr(tg_mod, "sync_all_dialogs", spy_sync)
+        result = runner.invoke(cli, ["refresh", "--json", "--yaml"])
+        assert result.exit_code == 2
+        assert calls == []

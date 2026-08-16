@@ -72,21 +72,49 @@ class TestConfig:
         cfg._load_env()
         assert cfg.get_api_id() == 777
 
-    def test_load_env_cwd_wins_over_data_dir(self, monkeypatch, tmp_path):
+    def test_foreign_cwd_env_is_ignored(self, monkeypatch, tmp_path):
+        """A project-local .env must not hijack the global CLI (#29)."""
         monkeypatch.delenv("DATA_DIR", raising=False)
         monkeypatch.delenv("TG_API_ID", raising=False)
+        monkeypatch.delenv("TG_ENV_FILE", raising=False)
         monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
         data_dir = tmp_path / "xdg" / "tg-cli"
         data_dir.mkdir(parents=True)
         (data_dir / ".env").write_text("TG_API_ID=777\n")
         cwd = tmp_path / "proj"
         cwd.mkdir()
-        (cwd / ".env").write_text("TG_API_ID=555\n")
+        (cwd / ".env").write_text("TG_API_ID=555\nDATA_DIR=./stolen\n")
         monkeypatch.chdir(cwd)
         import tg_cli.config as cfg
 
         cfg._load_env()
-        assert cfg.get_api_id() == 555
+        assert cfg.get_api_id() == 777
+        assert "DATA_DIR" not in __import__("os").environ or \
+            __import__("os").environ["DATA_DIR"] != "./stolen"
+
+    def test_explicit_env_file_opt_in(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("DATA_DIR", raising=False)
+        monkeypatch.delenv("TG_API_ID", raising=False)
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+        custom = tmp_path / "custom.env"
+        custom.write_text("TG_API_ID=444\n")
+        monkeypatch.setenv("TG_ENV_FILE", str(custom))
+        import tg_cli.config as cfg
+
+        cfg._load_env()
+        assert cfg.get_api_id() == 444
+
+    def test_process_env_beats_env_files(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("DATA_DIR", raising=False)
+        monkeypatch.setenv("TG_API_ID", "999")
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+        data_dir = tmp_path / "xdg" / "tg-cli"
+        data_dir.mkdir(parents=True)
+        (data_dir / ".env").write_text("TG_API_ID=777\n")
+        import tg_cli.config as cfg
+
+        cfg._load_env()
+        assert cfg.get_api_id() == 999
 
     def test_get_data_dir_from_env_relative_to_cwd(self, monkeypatch, tmp_path):
         monkeypatch.chdir(tmp_path)
