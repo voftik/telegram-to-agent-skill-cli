@@ -34,10 +34,6 @@ def populated_db(tmp_path, monkeypatch):
     db_path = tmp_path / "test.db"
     monkeypatch.setenv("DB_PATH", str(db_path))
 
-    import tg_cli.config as config_mod
-
-    monkeypatch.setattr(config_mod, "_PROJECT_ROOT", tmp_path)
-
     db = MessageDB(db_path=db_path)
 
     now = datetime.now(timezone.utc)
