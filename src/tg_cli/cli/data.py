@@ -65,8 +65,17 @@ def export(chat: str, fmt: str, output_file: str | None, hours: int | None):
 @data_group.command("purge")
 @click.argument("chat")
 @click.option("-y", "--yes", is_flag=True, help="Skip confirmation")
-def purge(chat: str, yes: bool):
-    """Delete all stored messages for CHAT."""
+@click.option(
+    "--keep-files",
+    is_flag=True,
+    help="Keep downloaded attachment files on disk (default: delete them)",
+)
+def purge(chat: str, yes: bool, keep_files: bool):
+    """Delete ALL local data of CHAT: messages, search index, links,
+    attachment metadata and (unless --keep-files) downloaded files."""
+    from ..client import remove_local_files
+    from ..config import get_data_dir
+
     with MessageDB() as db:
         chat_id = resolve_chat_id_or_print(db, chat)
         if chat_id is None:
@@ -77,5 +86,20 @@ def purge(chat: str, yes: bool):
             if not click.confirm(f"Delete {count} messages from chat {chat_id}?"):
                 return
 
-        deleted = db.delete_chat(chat_id)
-    console.print(f"[green]✓[/green] Deleted {deleted} messages")
+        res = db.delete_chat(chat_id)
+
+    files_note = "kept"
+    if not keep_files:
+        remove_local_files(res["files"])
+        chat_dir = get_data_dir() / "files" / str(chat_id)
+        try:
+            if chat_dir.is_dir() and not any(chat_dir.iterdir()):
+                chat_dir.rmdir()
+        except OSError:
+            pass
+        files_note = f"{len(res['files'])} removed"
+    console.print(
+        f"[green]✓[/green] Purged chat {chat_id}: {res['messages']} messages, "
+        f"{res['attachments']} attachments, {res['links']} links, "
+        f"files: {files_note}"
+    )

@@ -36,6 +36,17 @@ _SYSTEM_LANG_CODE = "en-US"
 _FIRST_SYNC_LIMIT = 500
 
 
+def remove_local_files(paths: list[str]) -> None:
+    """Best-effort removal of downloaded attachment files (privacy, #24)."""
+    from pathlib import Path
+
+    for raw in paths:
+        try:
+            Path(raw).unlink(missing_ok=True)
+        except OSError as e:
+            log.warning("could not remove %s: %s", raw, e)
+
+
 def marked_peer_id(entity) -> int:
     """Collision-free chat key: Telethon's marked ID (#21).
 
@@ -325,11 +336,10 @@ class _Ingest:
         return False
 
     def flush(self) -> None:
-        if self.batch:
-            self.stored += self.db.insert_batch(self.batch)
-            self.batch.clear()
-        self.db.insert_attachments(self.att_batch)
-        self.db.insert_links(self.link_batch)
+        # One transaction for messages + attachments + links (#23); edited
+        # messages refresh their text, FTS entry and links (#24).
+        self.stored += self.db.store_batch(self.batch, self.att_batch, self.link_batch)
+        self.batch.clear()
         self.att_batch.clear()
         self.link_batch.clear()
 
@@ -797,7 +807,7 @@ async def listen(
 
             meta = extract_message_meta(msg)
             marked = getattr(event, "chat_id", None) or marked_peer_id(chat)
-            db.insert_message(
+            message_row = dict(
                 chat_id=marked,
                 chat_name=chat_name,
                 msg_id=msg.id,
@@ -808,18 +818,39 @@ async def listen(
                 reply_to_msg_id=meta["reply_to_msg_id"],
                 has_media=meta["has_media"],
             )
-            if meta["attachment"]:
-                db.insert_attachments([dict(chat_id=marked, msg_id=msg.id, **meta["attachment"])])
-            if meta["links"]:
-                db.insert_links(
-                    [dict(chat_id=marked, msg_id=msg.id, **link) for link in meta["links"]]
-                )
+            atts = (
+                [dict(chat_id=marked, msg_id=msg.id, **meta["attachment"])]
+                if meta["attachment"]
+                else []
+            )
+            lnks = [dict(chat_id=marked, msg_id=msg.id, **link) for link in meta["links"]]
+            db.store_batch([message_row], atts, lnks)
 
             time_str = ts.strftime("%H:%M:%S") if ts else "??:??:??"
             console.print(
                 f"[dim]{time_str}[/dim] [cyan]{chat_name}[/cyan] | "
                 f"[bold]{sender_name or 'Unknown'}[/bold]: {content[:200]}"
             )
+
+        @client.on(events.MessageEdited(chats=chats))
+        async def edited_handler(event):
+            # Same pipeline as new messages — store_batch upserts the text
+            # and refreshes FTS/links (#24).
+            await handler(event)
+
+        @client.on(events.MessageDeleted(chats=chats))
+        async def deleted_handler(event):
+            if event.chat_id is None:
+                # Telegram does not say which private dialog these ids belong
+                # to; deleting by bare msg_id would hit wrong chats.
+                log.debug("delete event without chat: ids=%s", event.deleted_ids)
+                return
+            res = db.delete_messages(event.chat_id, list(event.deleted_ids))
+            remove_local_files(res["files"])
+            if res["messages"]:
+                console.print(
+                    f"[dim]deleted {res['messages']} message(s) in {event.chat_id}[/dim]"
+                )
 
         status = "disconnected"
         try:

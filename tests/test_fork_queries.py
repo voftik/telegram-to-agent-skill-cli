@@ -230,3 +230,180 @@ class TestMarkedIds:
             " ORDER BY msg_id"
         ).fetchall()
         assert [(r["msg_id"], r["content"]) for r in rows] == [(1, "новая"), (2, "ещё")]
+
+
+# ─────────────────────── atomic batches (#23) ───────────────────────
+
+
+class TestAtomicStoreBatch:
+    def test_bad_row_rolls_back_whole_batch(self, db):
+        import sqlite3
+
+        import pytest as _pytest
+
+        msgs = [make_msg(msg_id=i, content=f"msg {i}") for i in range(1, 4)]
+        bad_attachment = dict(
+            chat_id=100, msg_id=2, kind=None,  # NOT NULL violation
+            file_name="x", mime_type=None, size_bytes=1,
+        )
+        with _pytest.raises(sqlite3.Error):
+            db.store_batch(msgs, [bad_attachment], [])
+        assert db.count() == 0  # nothing from the batch survived
+
+    def test_error_not_silently_zero(self, db):
+        """insert_message must raise on real errors, not return False (#23)."""
+        import sqlite3
+
+        import pytest as _pytest
+
+        db.conn.execute("DROP TABLE attachments")
+        with _pytest.raises(sqlite3.Error):
+            db.insert_attachments(
+                [dict(chat_id=1, msg_id=1, kind="document",
+                      file_name=None, mime_type=None, size_bytes=None)]
+            )
+
+    def test_failed_flush_marks_sync_failed_and_records_gap(self, db, monkeypatch):
+        """A storage error mid-sync → status failed + gap cursor (recovery
+        path: the range will be re-fetched, restoring attachments/links)."""
+        import asyncio
+        import sqlite3 as _sq
+
+        from test_client import _make_chat
+
+        from tg_cli.client import fetch_history
+
+        client, entity = _make_chat(450)
+        original = db.store_batch
+        calls = {"n": 0}
+
+        def flaky(messages, attachments=None, links=None):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise _sq.OperationalError("disk I/O error")
+            return original(messages, attachments, links)
+
+        monkeypatch.setattr(db, "store_batch", flaky)
+        res = asyncio.run(fetch_history(client, 100, db=db, limit=1000, min_id=0))
+        assert res["status"] == "failed"
+        assert db.get_gaps(chat_id=100) != []
+
+
+# ─────────────────────── edits & deletes (#24) ───────────────────────
+
+
+class TestEditsAndDeletes:
+    def test_upsert_refreshes_content_fts_and_links(self, db):
+        db.store_batch(
+            [make_msg(msg_id=1, content="устаревший текст http://old.io")],
+            [],
+            [dict(chat_id=100, msg_id=1, url="http://old.io",
+                  fetch_url="http://old.io", kind="web")],
+        )
+        # Refetch after remote edit
+        db.store_batch(
+            [make_msg(msg_id=1, content="исправленный текст http://new.io")],
+            [],
+            [dict(chat_id=100, msg_id=1, url="http://new.io",
+                  fetch_url="http://new.io", kind="web")],
+        )
+        row = db.conn.execute(
+            "SELECT content FROM messages WHERE msg_id = 1"
+        ).fetchone()
+        assert row["content"] == "исправленный текст http://new.io"
+        assert db.search("исправленный") != []
+        assert db.search("устаревший") == []
+        urls = [r["url"] for r in db.get_links(chat_id=100)]
+        assert urls == ["http://new.io"]
+
+    def test_delete_messages_cascades(self, db, tmp_path):
+        f = tmp_path / "doc.pdf"
+        f.write_bytes(b"x")
+        db.store_batch(
+            [make_msg(msg_id=1, content="удаляемое", has_media=True)],
+            [dict(chat_id=100, msg_id=1, kind="document",
+                  file_name="doc.pdf", mime_type=None, size_bytes=1)],
+            [dict(chat_id=100, msg_id=1, url="https://a.io",
+                  fetch_url="https://a.io", kind="web")],
+        )
+        db.mark_attachment_downloaded(
+            100, 1, local_path=str(f), sha256="aa", text_path=None
+        )
+        res = db.delete_messages(100, [1])
+        assert res["messages"] == 1
+        assert res["attachments"] == 1
+        assert res["links"] == 1
+        assert str(f) in res["files"]
+        assert db.search("удаляемое") == []
+        assert db.get_links(chat_id=100) == []
+        assert db.get_attachments(chat_id=100) == []
+
+
+# ─────────────────────── migration safety (#25) ───────────────────────
+
+
+class TestMigrationSafety:
+    def test_concurrent_opens_of_v1_db(self, tmp_path):
+        import sqlite3
+        import threading
+
+        from tg_cli.db import MessageDB
+
+        path = tmp_path / "v1.db"
+        conn = sqlite3.connect(str(path))
+        conn.execute(
+            """CREATE TABLE messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                platform TEXT NOT NULL DEFAULT 'telegram',
+                chat_id INTEGER NOT NULL, chat_name TEXT, msg_id INTEGER NOT NULL,
+                sender_id INTEGER, sender_name TEXT, content TEXT,
+                timestamp TEXT NOT NULL, raw_json TEXT,
+                UNIQUE(platform, chat_id, msg_id))"""
+        )
+        conn.execute(
+            "INSERT INTO messages (chat_id, msg_id, content, timestamp)"
+            " VALUES (1, 1, 'параллельная миграция', 't')"
+        )
+        conn.commit()
+        conn.close()
+
+        errors: list[Exception] = []
+
+        def _open():
+            try:
+                MessageDB(path).close()
+            except Exception as e:  # noqa: BLE001
+                errors.append(e)
+
+        threads = [threading.Thread(target=_open) for _ in range(12)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert errors == []
+
+        db = MessageDB(path)
+        assert db.conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert db.search("параллельная") != []
+        db.close()
+
+    def test_fts_desync_repaired_on_open(self, tmp_path):
+        from tg_cli.db import MessageDB
+
+        path = tmp_path / "m.db"
+        db = MessageDB(path)
+        db.insert_message(**make_msg(msg_id=1, content="потерянный из индекса"))
+        # Simulate a crash that left the row unindexed
+        row_id = db.conn.execute("SELECT id FROM messages WHERE msg_id = 1").fetchone()[0]
+        db.conn.execute(
+            "INSERT INTO messages_fts(messages_fts, rowid, content)"
+            " VALUES ('delete', ?, 'потерянный из индекса')",
+            (row_id,),
+        )
+        db.conn.commit()
+        assert db._search_fts("потерянный", None, None, None, 10) == []
+        db.close()
+
+        db2 = MessageDB(path)  # reopen → integrity check → rebuild
+        assert db2._search_fts("потерянный", None, None, None, 10) != []
+        db2.close()

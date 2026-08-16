@@ -231,12 +231,12 @@ class TestDeleteChat:
         db.insert_message(**make_msg(chat_id=200, msg_id=99))
 
         deleted = db.delete_chat(100)
-        assert deleted == 5
+        assert deleted["messages"] == 5
         assert db.count() == 1
 
     def test_delete_nonexistent(self, db):
         deleted = db.delete_chat(999)
-        assert deleted == 0
+        assert deleted["messages"] == 0
 
 
 # ─────────────────────── context manager ───────────────────────

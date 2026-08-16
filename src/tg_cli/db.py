@@ -40,100 +40,131 @@ CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(sender_name);
 # Schema v3: sync_gaps — gap-safe incremental sync cursors (#22).
 _SCHEMA_VERSION = 3
 
-_MIGRATION_V3 = """
-CREATE TABLE IF NOT EXISTS sync_gaps (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    chat_id    INTEGER NOT NULL,
-    from_id    INTEGER NOT NULL,  -- exclusive lower bound (msg_id > from_id)
-    to_id      INTEGER NOT NULL,  -- exclusive upper bound (msg_id < to_id)
-    kind       TEXT    NOT NULL DEFAULT 'gap',  -- gap: must-fill hole | backfill: older history
-    created_at TEXT,
-    UNIQUE(chat_id, from_id, to_id, kind)
-);
-CREATE INDEX IF NOT EXISTS idx_sync_gaps_chat ON sync_gaps(chat_id, kind);
-"""
+_MIGRATION_V3_STATEMENTS = [
+    """CREATE TABLE IF NOT EXISTS sync_gaps (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id    INTEGER NOT NULL,
+        from_id    INTEGER NOT NULL,
+        to_id      INTEGER NOT NULL,
+        kind       TEXT    NOT NULL DEFAULT 'gap',
+        created_at TEXT,
+        UNIQUE(chat_id, from_id, to_id, kind)
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_sync_gaps_chat ON sync_gaps(chat_id, kind)",
+]
 
-_MIGRATION_V2_TABLES = """
-CREATE TABLE IF NOT EXISTS attachments (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    chat_id       INTEGER NOT NULL,
-    msg_id        INTEGER NOT NULL,
-    kind          TEXT    NOT NULL,  -- document|image|voice|video|audio|other
-    file_name     TEXT,
-    mime_type     TEXT,
-    size_bytes    INTEGER,
-    sha256        TEXT,
-    local_path    TEXT,
-    text_path     TEXT,
-    transcript_path TEXT,            -- v2 hook: voice/video transcription
-    downloaded_at TEXT,
-    UNIQUE(chat_id, msg_id)          -- one media per Telegram message; albums are separate messages
-);
-CREATE INDEX IF NOT EXISTS idx_attachments_chat ON attachments(chat_id, kind);
+_MIGRATION_V2_STATEMENTS = [
+    """CREATE TABLE IF NOT EXISTS attachments (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id       INTEGER NOT NULL,
+        msg_id        INTEGER NOT NULL,
+        kind          TEXT    NOT NULL,
+        file_name     TEXT,
+        mime_type     TEXT,
+        size_bytes    INTEGER,
+        sha256        TEXT,
+        local_path    TEXT,
+        text_path     TEXT,
+        transcript_path TEXT,
+        downloaded_at TEXT,
+        UNIQUE(chat_id, msg_id)
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_attachments_chat ON attachments(chat_id, kind)",
+    """CREATE TABLE IF NOT EXISTS links (
+        id        INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id   INTEGER NOT NULL,
+        msg_id    INTEGER NOT NULL,
+        url       TEXT    NOT NULL,
+        fetch_url TEXT,
+        kind      TEXT    NOT NULL DEFAULT 'web',
+        UNIQUE(chat_id, msg_id, url)
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_links_chat ON links(chat_id, kind)",
+]
 
-CREATE TABLE IF NOT EXISTS links (
-    id        INTEGER PRIMARY KEY AUTOINCREMENT,
-    chat_id   INTEGER NOT NULL,
-    msg_id    INTEGER NOT NULL,
-    url       TEXT    NOT NULL,
-    fetch_url TEXT,
-    kind      TEXT    NOT NULL DEFAULT 'web',  -- gdoc|gsheet|gslides|tme|web
-    UNIQUE(chat_id, msg_id, url)
-);
-CREATE INDEX IF NOT EXISTS idx_links_chat ON links(chat_id, kind);
-"""
-
-_MIGRATION_V2_FTS = """
-CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
-    content,
-    content='messages',
-    content_rowid='id',
-    tokenize='unicode61 remove_diacritics 2'
-);
-CREATE TRIGGER IF NOT EXISTS messages_fts_ai AFTER INSERT ON messages BEGIN
-    INSERT INTO messages_fts(rowid, content) VALUES (new.id, coalesce(new.content, ''));
-END;
-CREATE TRIGGER IF NOT EXISTS messages_fts_ad AFTER DELETE ON messages BEGIN
-    INSERT INTO messages_fts(messages_fts, rowid, content)
-    VALUES ('delete', old.id, coalesce(old.content, ''));
-END;
-CREATE TRIGGER IF NOT EXISTS messages_fts_au AFTER UPDATE OF content ON messages BEGIN
-    INSERT INTO messages_fts(messages_fts, rowid, content)
-    VALUES ('delete', old.id, coalesce(old.content, ''));
-    INSERT INTO messages_fts(rowid, content) VALUES (new.id, coalesce(new.content, ''));
-END;
-"""
+_MIGRATION_FTS_STATEMENTS = [
+    """CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+        content,
+        content='messages',
+        content_rowid='id',
+        tokenize='unicode61 remove_diacritics 2'
+    )""",
+    """CREATE TRIGGER IF NOT EXISTS messages_fts_ai AFTER INSERT ON messages BEGIN
+        INSERT INTO messages_fts(rowid, content) VALUES (new.id, coalesce(new.content, ''));
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS messages_fts_ad AFTER DELETE ON messages BEGIN
+        INSERT INTO messages_fts(messages_fts, rowid, content)
+        VALUES ('delete', old.id, coalesce(old.content, ''));
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS messages_fts_au AFTER UPDATE OF content ON messages BEGIN
+        INSERT INTO messages_fts(messages_fts, rowid, content)
+        VALUES ('delete', old.id, coalesce(old.content, ''));
+        INSERT INTO messages_fts(rowid, content) VALUES (new.id, coalesce(new.content, ''));
+    END""",
+]
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
-    """Bring an existing database up to _SCHEMA_VERSION. Idempotent."""
+    """Bring the database up to _SCHEMA_VERSION — concurrency- and
+    crash-safe (#25).
+
+    The whole migration runs inside BEGIN IMMEDIATE: concurrent openers
+    queue on the write lock (busy_timeout) and re-check the actual state
+    once they get it, so parallel opens of an old database converge on one
+    correct schema instead of racing ALTER TABLE. A crash at any point
+    rolls the transaction back; user_version is set only at the end.
+    """
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     if version >= _SCHEMA_VERSION:
+        _ensure_fts_complete(conn)
         return
 
-    cols = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
-    if "reply_to_msg_id" not in cols:
-        conn.execute("ALTER TABLE messages ADD COLUMN reply_to_msg_id INTEGER")
-    if "has_media" not in cols:
-        conn.execute("ALTER TABLE messages ADD COLUMN has_media INTEGER NOT NULL DEFAULT 0")
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        # Re-check under the write lock — another process may have migrated
+        # while we were waiting.
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        if version < _SCHEMA_VERSION:
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
+            if "reply_to_msg_id" not in cols:
+                conn.execute("ALTER TABLE messages ADD COLUMN reply_to_msg_id INTEGER")
+            if "has_media" not in cols:
+                conn.execute(
+                    "ALTER TABLE messages ADD COLUMN has_media INTEGER NOT NULL DEFAULT 0"
+                )
+            for stmt in (
+                _MIGRATION_V2_STATEMENTS
+                + _MIGRATION_FTS_STATEMENTS
+                + _MIGRATION_V3_STATEMENTS
+            ):
+                conn.execute(stmt)
+            conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    _ensure_fts_complete(conn)
 
-    conn.executescript(_MIGRATION_V2_TABLES)
 
-    fts_existed = (
-        conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'messages_fts'"
-        ).fetchone()
-        is not None
-    )
-    conn.executescript(_MIGRATION_V2_FTS)
-    if not fts_existed:
-        # Index everything already stored before the triggers existed.
+def _ensure_fts_complete(conn: sqlite3.Connection) -> None:
+    """Detect and repair an incomplete external-content FTS index (#25).
+
+    A crash between creating messages_fts and finishing its rebuild leaves
+    rows unindexed; row-count mismatch is cheap to check and definitive.
+    """
+    try:
+        msg_count = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+        # For an external-content FTS5 table COUNT(*) on the table itself
+        # reads the *content* table and always matches; the docsize shadow
+        # table is the real count of indexed documents.
+        fts_count = conn.execute("SELECT COUNT(*) FROM messages_fts_docsize").fetchone()[0]
+    except sqlite3.Error as e:
+        log.warning("FTS integrity check failed: %s", e)
+        return
+    if msg_count != fts_count:
+        log.warning("rebuilding FTS index (%d messages, %d indexed)", msg_count, fts_count)
         conn.execute("INSERT INTO messages_fts(messages_fts) VALUES ('rebuild')")
-
-    conn.executescript(_MIGRATION_V3)
-
-    conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
-    conn.commit()
+        conn.commit()
 
 
 _CHANNEL_MARK = 1_000_000_000_000
@@ -166,6 +197,7 @@ class MessageDB:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(str(self.db_path))
         self.conn.row_factory = sqlite3.Row
+        self.conn.execute("PRAGMA busy_timeout = 30000")
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.executescript(_CREATE_TABLE + _CREATE_INDEX)
         _migrate(self.conn)
@@ -222,9 +254,12 @@ class MessageDB:
         reply_to_msg_id: int | None = None,
         has_media: bool = False,
     ) -> bool:
-        """Insert a message, returns True if inserted (not duplicate)."""
-        try:
-            cursor = self.conn.execute(
+        """Insert a message, returns True if inserted (not duplicate).
+
+        Duplicates are silently ignored (OR IGNORE); real SQLite errors
+        propagate — a storage failure must never look like "0 new" (#23).
+        """
+        cursor = self.conn.execute(
                 """INSERT OR IGNORE INTO messages
                    (
                        platform,
@@ -253,12 +288,9 @@ class MessageDB:
                     reply_to_msg_id,
                     int(has_media),
                 ),
-            )
-            self.conn.commit()
-            return cursor.rowcount > 0
-        except sqlite3.Error as e:
-            log.debug("insert_message failed: %s", e)
-            return False
+        )
+        self.conn.commit()
+        return cursor.rowcount > 0
 
     def insert_batch(self, messages: list[dict], platform: str = "telegram") -> int:
         """Batch insert messages in a single transaction.
@@ -287,32 +319,128 @@ class MessageDB:
             )
             for m in messages
         ]
-        try:
-            cursor = self.conn.executemany(
-                """INSERT OR IGNORE INTO messages
+        cursor = self.conn.executemany(
+            """INSERT OR IGNORE INTO messages
+               (
+                   platform, chat_id, chat_name, msg_id, sender_id, sender_name,
+                   content, timestamp, raw_json, reply_to_msg_id, has_media
+               )
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            rows,
+        )
+        self.conn.commit()
+        # rowcount excludes trigger-driven changes (FTS shadow tables),
+        # unlike total_changes, and counts only actually inserted rows.
+        return max(cursor.rowcount, 0)
+
+    @staticmethod
+    def _message_row(m: dict, platform: str = "telegram") -> tuple:
+        return (
+            platform,
+            m["chat_id"],
+            m.get("chat_name"),
+            m["msg_id"],
+            m.get("sender_id"),
+            m.get("sender_name"),
+            m.get("content"),
+            (
+                m["timestamp"].isoformat()
+                if isinstance(m["timestamp"], datetime)
+                else m["timestamp"]
+            ),
+            json.dumps(m["raw_json"], ensure_ascii=False) if m.get("raw_json") else None,
+            m.get("reply_to_msg_id"),
+            int(bool(m.get("has_media"))),
+        )
+
+    def store_batch(
+        self,
+        messages: list[dict],
+        attachments: list[dict] | None = None,
+        links: list[dict] | None = None,
+    ) -> int:
+        """Atomically store one ingest batch (#23, #24).
+
+        One transaction covers everything: messages are UPSERTed (an edited
+        message refreshes its text and the FTS index), the batch's links are
+        replaced with the freshly extracted set, attachment metadata is
+        upserted without touching download state. Any SQLite error rolls the
+        whole batch back and propagates.
+        """
+        if not messages:
+            return 0
+        rows = [self._message_row(m) for m in messages]
+        keys = sorted({(m["chat_id"], m["msg_id"]) for m in messages})
+        with self.conn:
+            cur = self.conn.executemany(
+                """INSERT INTO messages
                    (
-                       platform,
-                       chat_id,
-                       chat_name,
-                       msg_id,
-                       sender_id,
-                       sender_name,
-                       content,
-                       timestamp,
-                       raw_json,
-                       reply_to_msg_id,
-                       has_media
+                       platform, chat_id, chat_name, msg_id, sender_id, sender_name,
+                       content, timestamp, raw_json, reply_to_msg_id, has_media
                    )
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(platform, chat_id, msg_id) DO UPDATE SET
+                       content = excluded.content,
+                       sender_name = COALESCE(excluded.sender_name, messages.sender_name),
+                       reply_to_msg_id = excluded.reply_to_msg_id,
+                       has_media = excluded.has_media
+                   WHERE messages.content IS NOT excluded.content""",
                 rows,
             )
-            self.conn.commit()
-            # rowcount excludes trigger-driven changes (FTS shadow tables),
-            # unlike total_changes, and counts only actually inserted rows.
-            return max(cursor.rowcount, 0)
-        except sqlite3.Error as e:
-            log.warning("insert_batch failed: %s", e)
-            return 0
+            stored = max(cur.rowcount, 0)
+            # The extracted links of this batch are the fresh truth for these
+            # messages — stale links of edited messages must not survive.
+            self.conn.executemany(
+                "DELETE FROM links WHERE chat_id = ? AND msg_id = ?", keys
+            )
+            if links:
+                self.conn.executemany(
+                    """INSERT OR IGNORE INTO links
+                       (chat_id, msg_id, url, fetch_url, kind)
+                       VALUES (:chat_id, :msg_id, :url, :fetch_url, :kind)""",
+                    links,
+                )
+            if attachments:
+                self.conn.executemany(
+                    """INSERT INTO attachments
+                       (chat_id, msg_id, kind, file_name, mime_type, size_bytes)
+                       VALUES (:chat_id, :msg_id, :kind, :file_name, :mime_type, :size_bytes)
+                       ON CONFLICT(chat_id, msg_id) DO UPDATE SET
+                           kind = excluded.kind,
+                           file_name = COALESCE(excluded.file_name, attachments.file_name),
+                           mime_type = excluded.mime_type,
+                           size_bytes = excluded.size_bytes""",
+                    attachments,
+                )
+        return stored
+
+    def delete_messages(self, chat_id: int, msg_ids: list[int]) -> dict:
+        """Cascade-delete messages: rows + FTS (trigger), links, attachments.
+
+        Returns counts and the local file paths of removed attachments so
+        the caller can delete them from disk (#24).
+        """
+        if not msg_ids:
+            return {"messages": 0, "attachments": 0, "links": 0, "files": []}
+        marks = ",".join("?" * len(msg_ids))
+        params = [chat_id, *msg_ids]
+        with self.conn:
+            file_rows = self.conn.execute(
+                f"""SELECT local_path, text_path, transcript_path FROM attachments
+                    WHERE chat_id = ? AND msg_id IN ({marks})""",
+                params,
+            ).fetchall()
+            files = [p for r in file_rows for p in r if p]
+            msgs = self.conn.execute(
+                f"DELETE FROM messages WHERE chat_id = ? AND msg_id IN ({marks})", params
+            ).rowcount
+            atts = self.conn.execute(
+                f"DELETE FROM attachments WHERE chat_id = ? AND msg_id IN ({marks})", params
+            ).rowcount
+            lnks = self.conn.execute(
+                f"DELETE FROM links WHERE chat_id = ? AND msg_id IN ({marks})", params
+            ).rowcount
+        return {"messages": msgs, "attachments": atts, "links": lnks, "files": files}
 
     def insert_attachments(self, rows: list[dict]) -> int:
         """Batch insert attachment metadata. Duplicates are ignored."""
@@ -549,11 +677,35 @@ class MessageDB:
             row = self.conn.execute("SELECT MAX(timestamp) FROM messages").fetchone()
         return row[0] if row and row[0] is not None else None
 
-    def delete_chat(self, chat_id: int) -> int:
-        """Delete all messages for a chat. Returns number of deleted rows."""
-        cursor = self.conn.execute("DELETE FROM messages WHERE chat_id = ?", (chat_id,))
-        self.conn.commit()
-        return cursor.rowcount
+    def delete_chat(self, chat_id: int) -> dict:
+        """Cascade-delete an entire chat: messages, FTS, links, attachments,
+        gap cursors. Returns per-table counts and attachment file paths (#24)."""
+        with self.conn:
+            file_rows = self.conn.execute(
+                "SELECT local_path, text_path, transcript_path FROM attachments"
+                " WHERE chat_id = ?",
+                (chat_id,),
+            ).fetchall()
+            files = [p for r in file_rows for p in r if p]
+            msgs = self.conn.execute(
+                "DELETE FROM messages WHERE chat_id = ?", (chat_id,)
+            ).rowcount
+            atts = self.conn.execute(
+                "DELETE FROM attachments WHERE chat_id = ?", (chat_id,)
+            ).rowcount
+            lnks = self.conn.execute(
+                "DELETE FROM links WHERE chat_id = ?", (chat_id,)
+            ).rowcount
+            gaps = self.conn.execute(
+                "DELETE FROM sync_gaps WHERE chat_id = ?", (chat_id,)
+            ).rowcount
+        return {
+            "messages": msgs,
+            "attachments": atts,
+            "links": lnks,
+            "gaps": gaps,
+            "files": files,
+        }
 
     def top_senders(
         self,

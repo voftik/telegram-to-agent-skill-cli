@@ -765,14 +765,26 @@ def tg_edit(chat: str, msg_id: int, new_text: str, no_preview: bool, as_json: bo
 
     async def _run():
         async with connect() as client:
-            return await client.edit_message(
+            result = await client.edit_message(
                 _parse_chat(chat),
                 msg_id,
                 new_text,
                 link_preview=not no_preview,
             )
+            # Mirror the remote edit into the local index right away (#24):
+            # FTS refreshes via the content-update trigger.
+            from ..client import marked_peer_id
 
-    asyncio.run(_run())
+            entity = await client.get_entity(_parse_chat(chat))
+            with MessageDB() as db:
+                db.conn.execute(
+                    "UPDATE messages SET content = ? WHERE chat_id = ? AND msg_id = ?",
+                    (new_text, marked_peer_id(entity), msg_id),
+                )
+                db.conn.commit()
+            return result
+
+    _run_async(_run())
     payload = {"edited": True, "msg_id": msg_id, "chat": chat}
     if emit_structured(payload, as_json=as_json, as_yaml=as_yaml):
         return
@@ -789,8 +801,16 @@ def tg_delete(chat: str, msg_ids: tuple[int, ...], as_json: bool, as_yaml: bool)
     async def _run():
         async with connect() as client:
             await client.delete_messages(_parse_chat(chat), list(msg_ids))
+            # Cascade the deletion locally: messages, FTS, links, attachments
+            # and downloaded files (#24).
+            from ..client import marked_peer_id, remove_local_files
 
-    asyncio.run(_run())
+            entity = await client.get_entity(_parse_chat(chat))
+            with MessageDB() as db:
+                res = db.delete_messages(marked_peer_id(entity), list(msg_ids))
+            remove_local_files(res["files"])
+
+    _run_async(_run())
     payload = {"deleted": True, "msg_ids": list(msg_ids), "chat": chat}
     if emit_structured(payload, as_json=as_json, as_yaml=as_yaml):
         return
