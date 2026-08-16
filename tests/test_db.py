@@ -330,16 +330,17 @@ class TestTimeline:
 
 class TestGetToday:
     def test_today_returns_recent(self, db):
-        # Message from 1 hour ago should be "today"
-        db.insert_message(**make_msg(msg_id=1, hours_ago=1))
-        # Message from 48 hours ago should not be "today"
+        # "Now" is always today; hours_ago=1 would flake right after local
+        # midnight (the message would fall into yesterday).
+        db.insert_message(**make_msg(msg_id=1, hours_ago=0))
+        # Message from 48 hours ago is never "today"
         db.insert_message(**make_msg(msg_id=2, hours_ago=48))
         results = db.get_today()
         assert len(results) == 1
 
     def test_today_with_chat_filter(self, db):
-        db.insert_message(**make_msg(chat_id=100, msg_id=1, hours_ago=1))
-        db.insert_message(**make_msg(chat_id=200, msg_id=2, hours_ago=1))
+        db.insert_message(**make_msg(chat_id=100, msg_id=1, hours_ago=0))
+        db.insert_message(**make_msg(chat_id=200, msg_id=2, hours_ago=0))
         results = db.get_today(chat_id=100)
         assert len(results) == 1
 
