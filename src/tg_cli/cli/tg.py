@@ -473,6 +473,100 @@ def _log_sent(chat: str, msg_id: int, message: str) -> None:
         console.print(f"[yellow]\u26a0 sent.log write failed: {e}[/yellow]")
 
 
+@tg_group.command("files")
+@click.argument("chat")
+@click.option("--download", is_flag=True, help="Download pending files and extract text")
+@click.option(
+    "--type",
+    "kinds",
+    multiple=True,
+    type=click.Choice(["document", "image", "voice", "video", "audio", "other"]),
+    help="Filter by attachment kind (repeatable)",
+)
+@click.option("--msg-id", "msg_ids", multiple=True, type=int, help="Specific message IDs")
+@click.option("--hours", type=int, help="Only attachments within N hours")
+@click.option("-n", "--limit", default=20, show_default=True, help="Max files")
+@structured_output_options
+def tg_files(
+    chat: str,
+    download: bool,
+    kinds: tuple[str, ...],
+    msg_ids: tuple[int, ...],
+    hours: int | None,
+    limit: int,
+    as_json: bool,
+    as_yaml: bool,
+):
+    """List attachments of CHAT from the local index; --download fetches them.
+
+    Listing is offline. --download connects to Telegram, stores files under
+    <data_dir>/files/<chat_id>/ and extracts text (pdf, docx, xlsx, pptx,
+    csv…) into a sibling .txt whose path lands in text_path. Images are
+    downloaded as-is — read them with your own vision. Voice files are
+    downloaded but not transcribed (v2).
+    """
+    from ..db import MessageDB
+
+    with MessageDB() as db:
+        chat_id = resolve_chat_id_or_print(db, chat)
+        if chat_id is None:
+            return
+
+        if download:
+            from ..client import download_attachments
+
+            async def _run():
+                async with connect() as client:
+                    return await download_attachments(
+                        client,
+                        db,
+                        _parse_chat(chat) if str(chat).lstrip("-").isdigit() else chat,
+                        msg_ids=list(msg_ids) or None,
+                        kinds=list(kinds) or None,
+                        hours=hours,
+                        limit=limit,
+                    )
+
+            downloaded = asyncio.run(_run())
+            if emit_structured(downloaded, as_json=as_json, as_yaml=as_yaml):
+                return
+            if not downloaded:
+                console.print("[yellow]Nothing new to download.[/yellow]")
+                return
+            for d in downloaded:
+                extra = f" → text: {d['text_path']}" if d["text_path"] else ""
+                console.print(f"[green]✓[/green] {d['local_path']}{extra}")
+            console.print(f"\n[dim]{len(downloaded)} files downloaded[/dim]")
+            return
+
+        rows = db.get_attachments(
+            chat_id=chat_id,
+            hours=hours,
+            kind=kinds[0] if len(kinds) == 1 else None,
+            limit=limit,
+        )
+        if len(kinds) > 1:
+            rows = [r for r in rows if r["kind"] in kinds]
+        if msg_ids:
+            rows = [r for r in rows if r["msg_id"] in msg_ids]
+
+    if emit_structured(rows, as_json=as_json, as_yaml=as_yaml):
+        return
+    if not rows:
+        console.print("[yellow]No attachments in local index for this chat.[/yellow]")
+        return
+    for r in rows:
+        ts = (r.get("timestamp") or "")[:10]
+        size = r.get("size_bytes") or 0
+        state = "✓" if r.get("local_path") else "·"
+        name = r.get("file_name") or f"{r['kind']}_{r['msg_id']}"
+        console.print(
+            f" {state} [dim]{ts}[/dim] [{r['kind']}] {name}"
+            f" ({size // 1024} KB) msg:{r['msg_id']}"
+        )
+    console.print(f"\n[dim]{len(rows)} attachments (✓ = downloaded)[/dim]")
+
+
 @tg_group.command("edit")
 @click.argument("chat")
 @click.argument("msg_id", type=int)

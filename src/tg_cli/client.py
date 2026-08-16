@@ -299,6 +299,105 @@ async def fetch_history(
             db.close()
 
 
+async def download_attachments(
+    client: TelegramClient,
+    db: MessageDB,
+    chat: str | int,
+    *,
+    msg_ids: list[int] | None = None,
+    kinds: list[str] | None = None,
+    hours: int | None = None,
+    limit: int = 20,
+) -> list[dict]:
+    """Download pending attachments for a chat and extract text where possible.
+
+    Files land in <data_dir>/files/<chat_id>/, named <msg_id>_<file_name>.
+    Extracted text goes next to the file as <name>.txt. Already-downloaded
+    attachments (local_path set and the file still exists) are skipped, so
+    re-running never duplicates work.
+    """
+    import hashlib
+    import mimetypes
+    from pathlib import Path
+
+    from .config import get_data_dir
+    from .textextract import extract_text, extractable
+
+    entity = await client.get_entity(chat)
+    chat_id = entity.id
+
+    rows = db.get_attachments(chat_id=chat_id, hours=hours, limit=max(limit * 5, limit))
+    targets = []
+    for row in rows:
+        if msg_ids and row["msg_id"] not in msg_ids:
+            continue
+        if kinds and row["kind"] not in kinds:
+            continue
+        if row["local_path"] and Path(row["local_path"]).exists():
+            continue
+        targets.append(row)
+        if len(targets) >= limit:
+            break
+    if not targets:
+        return []
+
+    files_dir = get_data_dir() / "files" / str(chat_id)
+    files_dir.mkdir(parents=True, exist_ok=True)
+
+    results: list[dict] = []
+    by_id = {t["msg_id"]: t for t in targets}
+    ids = list(by_id)
+    for chunk_start in range(0, len(ids), 100):
+        chunk = ids[chunk_start : chunk_start + 100]
+        messages = await client.get_messages(entity, ids=chunk)
+        for msg in messages or []:
+            if msg is None or getattr(msg, "media", None) is None:
+                continue
+            row = by_id.get(msg.id)
+            if row is None:
+                continue
+            base = row["file_name"]
+            if not base:
+                ext = mimetypes.guess_extension(row["mime_type"] or "") or ""
+                base = f"{row['kind']}_{msg.id}{ext}"
+            target = files_dir / f"{msg.id}_{base}"
+            try:
+                saved = await client.download_media(msg, file=str(target))
+            except FloodWaitError as e:
+                console.print(f"[yellow]⚠ rate limit, waiting {e.seconds}s...[/yellow]")
+                await asyncio.sleep(e.seconds + random.uniform(1, 3))
+                continue
+            if not saved:
+                continue
+            saved_path = Path(saved)
+            sha = hashlib.sha256(saved_path.read_bytes()).hexdigest()
+            text_path = None
+            if extractable(saved_path):
+                text = extract_text(saved_path)
+                if text:
+                    tp = saved_path.with_name(saved_path.name + ".txt")
+                    tp.write_text(text, encoding="utf-8")
+                    text_path = str(tp)
+            db.mark_attachment_downloaded(
+                chat_id,
+                msg.id,
+                local_path=str(saved_path),
+                sha256=sha,
+                text_path=text_path,
+                file_name=saved_path.name,
+            )
+            results.append(
+                {
+                    "msg_id": msg.id,
+                    "kind": row["kind"],
+                    "local_path": str(saved_path),
+                    "text_path": text_path,
+                    "sha256": sha,
+                }
+            )
+    return results
+
+
 async def sync_all(
     client: TelegramClient,
     db: MessageDB,
