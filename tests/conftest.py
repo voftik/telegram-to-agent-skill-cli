@@ -13,6 +13,12 @@ os.environ.setdefault("OUTPUT", "rich")
 from tg_cli.db import MessageDB
 
 
+@pytest.fixture(autouse=True)
+def _isolated_data_dir(monkeypatch, tmp_path):
+    """Never let tests touch the user's real data dir (sent.log, files/…)."""
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "tg-data"))
+
+
 @pytest.fixture
 def db(tmp_path):
     """Create a temporary database for testing."""
