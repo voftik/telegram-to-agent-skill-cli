@@ -1,0 +1,60 @@
+<svg width="1280" height="640" viewBox="0 0 1280 640" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b1220"/>
+      <stop offset="0.6" stop-color="#101c33"/>
+      <stop offset="1" stop-color="#16233b"/>
+    </linearGradient>
+    <linearGradient id="tgblue" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2AABEE"/>
+      <stop offset="1" stop-color="#229ED9"/>
+    </linearGradient>
+    <radialGradient id="halo" cx="0.25" cy="0.4" r="0.6">
+      <stop offset="0" stop-color="#2AABEE" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#2AABEE" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="1280" height="640" fill="url(#bg)"/>
+  <rect width="1280" height="640" fill="url(#halo)"/>
+
+  <!-- Telegram tile with paper plane -->
+  <rect x="96" y="150" width="200" height="200" rx="46" fill="url(#tgblue)"/>
+  <path d="M139 255 L253 204 L231 301 C230 308 223 311 216 307 L192 288 L177 303 C174 306 169 305 169 299 L170 275 Z"
+        fill="#ffffff"/>
+  <path d="M170 275 L253 204 L192 288 L177 303 C174 306 169 305 169 299 Z"
+        fill="#d7ecfa"/>
+
+  <!-- Texts -->
+  <text x="340" y="215" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif"
+        font-size="54" font-weight="800" fill="#f1f5f9">Your Telegram, as agent context</text>
+  <text x="340" y="266" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif"
+        font-size="27" fill="#94a3b8">chats · files · links · full-text search — all local, for Claude Code &amp; Codex</text>
+
+  <!-- Chips -->
+  <g font-family="SF Mono, Menlo, Consolas, monospace" font-size="19">
+    <rect x="340" y="296" width="262" height="42" rx="21" fill="#1e3a5f"/>
+    <text x="471" y="323" text-anchor="middle" fill="#7dd3fc">skill auto-activates</text>
+    <rect x="618" y="296" width="184" height="42" rx="21" fill="#1e3a5f"/>
+    <text x="710" y="323" text-anchor="middle" fill="#7dd3fc">local SQLite</text>
+    <rect x="818" y="296" width="230" height="42" rx="21" fill="#1e3a5f"/>
+    <text x="933" y="323" text-anchor="middle" fill="#7dd3fc">send = --confirm</text>
+  </g>
+
+  <!-- Terminal strip -->
+  <rect x="96" y="408" width="1088" height="152" rx="16" fill="#0d1526" stroke="#1e2a44"/>
+  <circle cx="126" cy="436" r="6" fill="#ff5f57"/>
+  <circle cx="148" cy="436" r="6" fill="#febc2e"/>
+  <circle cx="170" cy="436" r="6" fill="#28c840"/>
+  <g font-family="SF Mono, Menlo, Consolas, monospace" font-size="20">
+    <text x="126" y="486" fill="#64748b">you ›</text>
+    <text x="196" y="486" fill="#e2e8f0">what did the team discuss this week?</text>
+    <text x="126" y="524" fill="#a78bfa">agent ›</text>
+    <text x="216" y="524" fill="#e2e8f0">tg brief · search · files</text>
+    <text x="560" y="524" fill="#4ade80">→ summary with dates, files &amp; links</text>
+  </g>
+
+  <!-- Footer -->
+  <text x="1184" y="600" text-anchor="end" font-family="SF Mono, Menlo, Consolas, monospace"
+        font-size="18" fill="#475569">github.com/voftik/telegram-to-agent-skill-cli</text>
+</svg>
