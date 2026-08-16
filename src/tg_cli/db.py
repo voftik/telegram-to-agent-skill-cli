@@ -36,6 +36,89 @@ CREATE INDEX IF NOT EXISTS idx_messages_content ON messages(content);
 CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(sender_name);
 """
 
+# Schema v2: attachments, links, threads, FTS5 (fork additions).
+_SCHEMA_VERSION = 2
+
+_MIGRATION_V2_TABLES = """
+CREATE TABLE IF NOT EXISTS attachments (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id       INTEGER NOT NULL,
+    msg_id        INTEGER NOT NULL,
+    kind          TEXT    NOT NULL,  -- document|image|voice|video|audio|other
+    file_name     TEXT,
+    mime_type     TEXT,
+    size_bytes    INTEGER,
+    sha256        TEXT,
+    local_path    TEXT,
+    text_path     TEXT,
+    transcript_path TEXT,            -- v2 hook: voice/video transcription
+    downloaded_at TEXT,
+    UNIQUE(chat_id, msg_id)          -- one media per Telegram message; albums are separate messages
+);
+CREATE INDEX IF NOT EXISTS idx_attachments_chat ON attachments(chat_id, kind);
+
+CREATE TABLE IF NOT EXISTS links (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id   INTEGER NOT NULL,
+    msg_id    INTEGER NOT NULL,
+    url       TEXT    NOT NULL,
+    fetch_url TEXT,
+    kind      TEXT    NOT NULL DEFAULT 'web',  -- gdoc|gsheet|gslides|tme|web
+    UNIQUE(chat_id, msg_id, url)
+);
+CREATE INDEX IF NOT EXISTS idx_links_chat ON links(chat_id, kind);
+"""
+
+_MIGRATION_V2_FTS = """
+CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+    content,
+    content='messages',
+    content_rowid='id',
+    tokenize='unicode61 remove_diacritics 2'
+);
+CREATE TRIGGER IF NOT EXISTS messages_fts_ai AFTER INSERT ON messages BEGIN
+    INSERT INTO messages_fts(rowid, content) VALUES (new.id, coalesce(new.content, ''));
+END;
+CREATE TRIGGER IF NOT EXISTS messages_fts_ad AFTER DELETE ON messages BEGIN
+    INSERT INTO messages_fts(messages_fts, rowid, content)
+    VALUES ('delete', old.id, coalesce(old.content, ''));
+END;
+CREATE TRIGGER IF NOT EXISTS messages_fts_au AFTER UPDATE OF content ON messages BEGIN
+    INSERT INTO messages_fts(messages_fts, rowid, content)
+    VALUES ('delete', old.id, coalesce(old.content, ''));
+    INSERT INTO messages_fts(rowid, content) VALUES (new.id, coalesce(new.content, ''));
+END;
+"""
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Bring an existing database up to _SCHEMA_VERSION. Idempotent."""
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if version >= _SCHEMA_VERSION:
+        return
+
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
+    if "reply_to_msg_id" not in cols:
+        conn.execute("ALTER TABLE messages ADD COLUMN reply_to_msg_id INTEGER")
+    if "has_media" not in cols:
+        conn.execute("ALTER TABLE messages ADD COLUMN has_media INTEGER NOT NULL DEFAULT 0")
+
+    conn.executescript(_MIGRATION_V2_TABLES)
+
+    fts_existed = (
+        conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'messages_fts'"
+        ).fetchone()
+        is not None
+    )
+    conn.executescript(_MIGRATION_V2_FTS)
+    if not fts_existed:
+        # Index everything already stored before the triggers existed.
+        conn.execute("INSERT INTO messages_fts(messages_fts) VALUES ('rebuild')")
+
+    conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+    conn.commit()
+
 
 def _canonical_chat_id(chat_id: int) -> int:
     """Normalize Telegram chat IDs to the bare numeric ID stored in SQLite.
@@ -64,6 +147,7 @@ class MessageDB:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.executescript(_CREATE_TABLE + _CREATE_INDEX)
+        _migrate(self.conn)
 
     def __enter__(self):
         return self
@@ -114,6 +198,8 @@ class MessageDB:
         content: str | None,
         timestamp: datetime,
         raw_json: dict[str, Any] | None = None,
+        reply_to_msg_id: int | None = None,
+        has_media: bool = False,
     ) -> bool:
         """Insert a message, returns True if inserted (not duplicate)."""
         try:
@@ -128,9 +214,11 @@ class MessageDB:
                        sender_name,
                        content,
                        timestamp,
-                       raw_json
+                       raw_json,
+                       reply_to_msg_id,
+                       has_media
                    )
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     platform,
                     chat_id,
@@ -141,6 +229,8 @@ class MessageDB:
                     content,
                     timestamp.isoformat(),
                     json.dumps(raw_json, ensure_ascii=False) if raw_json else None,
+                    reply_to_msg_id,
+                    int(has_media),
                 ),
             )
             self.conn.commit()
@@ -171,12 +261,13 @@ class MessageDB:
                     else m["timestamp"]
                 ),
                 json.dumps(m["raw_json"], ensure_ascii=False) if m.get("raw_json") else None,
+                m.get("reply_to_msg_id"),
+                int(bool(m.get("has_media"))),
             )
             for m in messages
         ]
         try:
-            before = self.conn.total_changes
-            self.conn.executemany(
+            cursor = self.conn.executemany(
                 """INSERT OR IGNORE INTO messages
                    (
                        platform,
@@ -187,13 +278,17 @@ class MessageDB:
                        sender_name,
                        content,
                        timestamp,
-                       raw_json
+                       raw_json,
+                       reply_to_msg_id,
+                       has_media
                    )
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 rows,
             )
             self.conn.commit()
-            return self.conn.total_changes - before
+            # rowcount excludes trigger-driven changes (FTS shadow tables),
+            # unlike total_changes, and counts only actually inserted rows.
+            return max(cursor.rowcount, 0)
         except sqlite3.Error as e:
             log.warning("insert_batch failed: %s", e)
             return 0

@@ -342,3 +342,108 @@ class TestGetToday:
         db.insert_message(**make_msg(chat_id=200, msg_id=2, hours_ago=1))
         results = db.get_today(chat_id=100)
         assert len(results) == 1
+
+
+# ─────────────────────── schema v2 migration (fork) ───────────────────────
+
+
+class TestMigrationV2:
+    def test_fresh_db_has_v2_schema(self, db):
+        tables = {
+            r[0]
+            for r in db.conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        assert {"messages", "attachments", "links", "messages_fts"} <= tables
+        assert db.conn.execute("PRAGMA user_version").fetchone()[0] == 2
+
+    def test_migrates_old_db_with_data(self, tmp_path):
+        """A v1 database (upstream schema) migrates in place, keeping rows."""
+        import sqlite3
+
+        from tg_cli.db import MessageDB
+
+        path = tmp_path / "old.db"
+        conn = sqlite3.connect(str(path))
+        conn.execute(
+            """CREATE TABLE messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                platform TEXT NOT NULL DEFAULT 'telegram',
+                chat_id INTEGER NOT NULL,
+                chat_name TEXT,
+                msg_id INTEGER NOT NULL,
+                sender_id INTEGER,
+                sender_name TEXT,
+                content TEXT,
+                timestamp TEXT NOT NULL,
+                raw_json TEXT,
+                UNIQUE(platform, chat_id, msg_id)
+            )"""
+        )
+        conn.execute(
+            "INSERT INTO messages (chat_id, chat_name, msg_id, content, timestamp)"
+            " VALUES (1, 'old chat', 10, 'договорились о встрече', '2026-08-01T10:00:00+00:00')"
+        )
+        conn.commit()
+        conn.close()
+
+        db = MessageDB(path)
+        cols = {r[1] for r in db.conn.execute("PRAGMA table_info(messages)")}
+        assert {"reply_to_msg_id", "has_media"} <= cols
+        assert db.count() == 1
+        # pre-existing rows are searchable through FTS after rebuild
+        hit = db.conn.execute(
+            "SELECT rowid FROM messages_fts WHERE messages_fts MATCH 'договорились'"
+        ).fetchall()
+        assert len(hit) == 1
+        db.close()
+
+    def test_migration_idempotent(self, tmp_path):
+        from tg_cli.db import MessageDB
+
+        path = tmp_path / "twice.db"
+        db1 = MessageDB(path)
+        db1.insert_message(**make_msg())
+        db1.close()
+        db2 = MessageDB(path)  # re-open: migration must be a no-op
+        assert db2.count() == 1
+        db2.close()
+
+    def test_fts_tracks_inserts(self, db):
+        db.insert_message(**make_msg(msg_id=1, content="обсудили запуск проекта"))
+        hits = db.conn.execute(
+            "SELECT rowid FROM messages_fts WHERE messages_fts MATCH 'запуск'"
+        ).fetchall()
+        assert len(hits) == 1
+
+    def test_fts_tracks_deletes(self, db):
+        db.insert_message(**make_msg(msg_id=1, content="временное сообщение"))
+        db.delete_chat(make_msg()["chat_id"])
+        hits = db.conn.execute(
+            "SELECT rowid FROM messages_fts WHERE messages_fts MATCH 'временное'"
+        ).fetchall()
+        assert hits == []
+
+    def test_insert_with_reply_and_media(self, db):
+        db.insert_message(**make_msg(msg_id=5, reply_to_msg_id=3, has_media=True))
+        row = db.conn.execute(
+            "SELECT reply_to_msg_id, has_media FROM messages WHERE msg_id = 5"
+        ).fetchone()
+        assert row["reply_to_msg_id"] == 3
+        assert row["has_media"] == 1
+
+    def test_batch_insert_with_reply(self, db):
+        msgs = [
+            make_msg(msg_id=i, reply_to_msg_id=i - 1, has_media=(i % 2 == 0))
+            for i in range(1, 4)
+        ]
+        assert db.insert_batch(msgs) == 3
+        rows = db.conn.execute(
+            "SELECT msg_id, reply_to_msg_id, has_media FROM messages ORDER BY msg_id"
+        ).fetchall()
+        assert [(r["msg_id"], r["reply_to_msg_id"], r["has_media"]) for r in rows] == [
+            (1, 0, 0),
+            (2, 1, 1),
+            (3, 2, 0),
+        ]

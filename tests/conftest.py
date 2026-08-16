@@ -60,6 +60,8 @@ def make_msg(
     sender_name: str = "Alice",
     content: str = "Hello World",
     hours_ago: float = 0,
+    reply_to_msg_id: int | None = None,
+    has_media: bool = False,
 ):
     ts = datetime.now(timezone.utc) - timedelta(hours=hours_ago)
     return dict(
@@ -70,4 +72,6 @@ def make_msg(
         sender_name=sender_name,
         content=content,
         timestamp=ts,
+        reply_to_msg_id=reply_to_msg_id,
+        has_media=has_media,
     )
