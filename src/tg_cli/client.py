@@ -301,14 +301,19 @@ async def _ingest_range(
     min_id: int = 0,
     max_id: int = 0,
     on_progress: Callable[[int], None] | None = None,
+    on_flush: Callable[[int], None] | None = None,
     batch_delay: float = 0,
 ) -> str | None:
     """Run one newest-first pass over a message range. Returns an error string
-    (FloodWait included) or None; everything fetched so far is committed."""
+    (FloodWait included) or None; everything fetched so far is committed.
+    on_flush(oldest_seen) fires after every committed batch so callers can
+    keep a durable cursor — this survives even a hard kill (#22)."""
     try:
         async for msg in client.iter_messages(entity, limit=limit, min_id=min_id, max_id=max_id):
             flushed = ingest.add(msg)
             if flushed:
+                if on_flush and ingest.oldest_seen is not None:
+                    on_flush(ingest.oldest_seen)
                 if on_progress:
                     on_progress(ingest.stored)
                 # Anti-ban: throttle between pagination batches
@@ -362,6 +367,19 @@ async def fetch_history(
         _remap_legacy_chat_id(db, entity, chat_id)
 
         ingest = _Ingest(db, chat_id, chat_name)
+        gap_kind = "backfill" if min_id == 0 else "gap"
+        cursor_id: int | None = None
+
+        def _on_flush(oldest: int) -> None:
+            # Durable cursor: after every committed batch the unfetched
+            # remainder (min_id, oldest) is on disk — a hard kill between
+            # batches can no longer create a silent hole (#22).
+            nonlocal cursor_id
+            if cursor_id is None:
+                cursor_id = db.record_gap_id(chat_id, min_id, oldest, kind=gap_kind)
+            else:
+                db.shrink_gap(cursor_id, oldest)
+
         error = await _ingest_range(
             client,
             entity,
@@ -369,18 +387,27 @@ async def fetch_history(
             limit=limit,
             min_id=min_id,
             on_progress=on_progress,
+            on_flush=_on_flush,
             batch_delay=batch_delay,
         )
 
-        status = "complete"
-        if error is not None:
+        complete = error is None and ingest.seen < limit
+        if cursor_id is not None:
+            if complete:
+                db.delete_gap(cursor_id)
+            elif ingest.oldest_seen is not None:
+                db.shrink_gap(cursor_id, ingest.oldest_seen)
+        elif not complete and ingest.oldest_seen is not None:
+            db.record_gap(chat_id, min_id, ingest.oldest_seen, kind=gap_kind)
+
+        if complete:
+            status = "complete"
+        elif error is not None:
             status = "failed" if not error.startswith("flood_wait") else "partial"
-        gap_kind = "backfill" if min_id == 0 else "gap"
-        if ingest.oldest_seen is not None and (error is not None or ingest.seen >= limit):
-            # Remainder (min_id, oldest_seen) was not fetched this pass.
-            if db.record_gap(chat_id, min_id, ingest.oldest_seen, kind=gap_kind):
-                if error is None and gap_kind == "gap":
-                    status = "partial"
+        else:
+            # Capped pass: an integrity gap means partial; a capped *first*
+            # sync is by-design depth (backfill cursor), still complete.
+            status = "partial" if gap_kind == "gap" else "complete"
 
         return {"stored": ingest.stored, "seen": ingest.seen, "status": status, "error": error}
     finally:
@@ -424,6 +451,7 @@ async def fill_gaps(
             limit=limit,
             min_id=gap["from_id"],
             max_id=gap["to_id"],
+            on_flush=lambda oldest, gap_id=gap["id"]: db.shrink_gap(gap_id, oldest),
             batch_delay=batch_delay,
         )
         stored += ingest.stored

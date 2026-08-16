@@ -830,13 +830,27 @@ class MessageDB:
         """
         if to_id - from_id <= 1:
             return False
-        self.conn.execute(
+        return self.record_gap_id(chat_id, from_id, to_id, kind) is not None
+
+    def record_gap_id(
+        self, chat_id: int, from_id: int, to_id: int, kind: str = "gap"
+    ) -> int | None:
+        """record_gap returning the row id (for live cursor updates)."""
+        if to_id - from_id <= 1:
+            return None
+        cur = self.conn.execute(
             """INSERT OR IGNORE INTO sync_gaps (chat_id, from_id, to_id, kind, created_at)
                VALUES (?, ?, ?, ?, ?)""",
             (chat_id, from_id, to_id, kind, datetime.now(timezone.utc).isoformat()),
         )
         self.conn.commit()
-        return True
+        if cur.lastrowid and cur.rowcount > 0:
+            return cur.lastrowid
+        row = self.conn.execute(
+            "SELECT id FROM sync_gaps WHERE chat_id=? AND from_id=? AND to_id=? AND kind=?",
+            (chat_id, from_id, to_id, kind),
+        ).fetchone()
+        return row["id"] if row else None
 
     def get_gaps(self, chat_id: int | None = None, kind: str | None = None) -> list[dict]:
         query = "SELECT * FROM sync_gaps WHERE 1=1"
