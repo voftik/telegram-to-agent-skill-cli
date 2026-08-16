@@ -3,13 +3,14 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "kabi-tg-cli"
-version = "0.6.0"
-description = "Telethon-powered Telegram CLI for local sync, search, and agent-friendly retrieval"
+name = "telegram-to-agent-skill-cli"
+version = "0.7.0.dev0"
+description = "Telegram context for coding agents: local sync, FTS5 search, attachments, links, threads — a tg-cli fork with an agent skill"
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
 authors = [{ name = "jackwener", email = "jakevingoo@gmail.com" }]
+maintainers = [{ name = "voftik" }]
 keywords = ["telegram", "tg", "cli", "telethon", "search", "agent"]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -34,9 +35,10 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/jackwener/tg-cli"
-Repository = "https://github.com/jackwener/tg-cli"
-Issues = "https://github.com/jackwener/tg-cli/issues"
+Homepage = "https://github.com/voftik/telegram-to-agent-skill-cli"
+Repository = "https://github.com/voftik/telegram-to-agent-skill-cli"
+Issues = "https://github.com/voftik/telegram-to-agent-skill-cli/issues"
+Upstream = "https://github.com/jackwener/tg-cli"
 
 
 [project.scripts]

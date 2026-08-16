@@ -13,8 +13,16 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
 def _load_env() -> None:
-    """Load .env from cwd first, then fall back to the source checkout."""
-    for candidate in (Path.cwd() / ".env", _PROJECT_ROOT / ".env"):
+    """Load .env from cwd, then the data directory, then the source checkout.
+
+    The data-dir candidate makes an installed CLI pick up credentials no
+    matter which directory an agent session runs it from.
+    """
+    if raw_data_dir := os.environ.get("DATA_DIR", ""):
+        data_env = Path(raw_data_dir).expanduser() / ".env"
+    else:
+        data_env = _default_data_home() / "tg-cli" / ".env"
+    for candidate in (Path.cwd() / ".env", data_env, _PROJECT_ROOT / ".env"):
         if candidate.is_file():
             load_dotenv(candidate)
             return

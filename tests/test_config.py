@@ -58,6 +58,36 @@ class TestConfig:
         assert d.exists()
         assert d == tmp_path / "xdg" / "tg-cli"
 
+    def test_load_env_from_data_dir(self, monkeypatch, tmp_path):
+        """Installed CLI must pick up <data_dir>/.env from any cwd."""
+        monkeypatch.delenv("DATA_DIR", raising=False)
+        monkeypatch.delenv("TG_API_ID", raising=False)
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+        data_dir = tmp_path / "xdg" / "tg-cli"
+        data_dir.mkdir(parents=True)
+        (data_dir / ".env").write_text("TG_API_ID=777\n")
+        monkeypatch.chdir(tmp_path)  # cwd without .env
+        import tg_cli.config as cfg
+
+        cfg._load_env()
+        assert cfg.get_api_id() == 777
+
+    def test_load_env_cwd_wins_over_data_dir(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("DATA_DIR", raising=False)
+        monkeypatch.delenv("TG_API_ID", raising=False)
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+        data_dir = tmp_path / "xdg" / "tg-cli"
+        data_dir.mkdir(parents=True)
+        (data_dir / ".env").write_text("TG_API_ID=777\n")
+        cwd = tmp_path / "proj"
+        cwd.mkdir()
+        (cwd / ".env").write_text("TG_API_ID=555\n")
+        monkeypatch.chdir(cwd)
+        import tg_cli.config as cfg
+
+        cfg._load_env()
+        assert cfg.get_api_id() == 555
+
     def test_get_data_dir_from_env_relative_to_cwd(self, monkeypatch, tmp_path):
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("DATA_DIR", "./runtime-data")

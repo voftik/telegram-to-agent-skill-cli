@@ -12,3 +12,8 @@ build/
 *.session-wal
 data/
 .pytest_cache/
+
+# fork additions
+*.db
+files/
+sent.log
