@@ -861,3 +861,139 @@ class TestFormatConflictPreflight:
         result = runner.invoke(cli, ["refresh", "--json", "--yaml"])
         assert result.exit_code == 2
         assert calls == []
+
+
+class TestMutationPipeline:
+    """#26 — unified dry-run/confirm + durable audit for write commands."""
+
+    def _no_connect(self, monkeypatch):
+        import tg_cli.cli.tg as tg_mod
+
+        calls = []
+
+        @asynccontextmanager
+        async def spy_connect():
+            calls.append("connect")
+            yield object()
+
+        monkeypatch.setattr(tg_mod, "connect", spy_connect)
+        return calls
+
+    def test_edit_without_confirm_is_dry_run(self, runner, monkeypatch):
+        calls = self._no_connect(monkeypatch)
+        result = runner.invoke(cli, ["edit", "Chat", "5", "new text"])
+        assert result.exit_code == 0
+        assert "DRY-RUN" in result.output
+        assert calls == []
+
+    def test_delete_without_confirm_is_dry_run(self, runner, monkeypatch):
+        calls = self._no_connect(monkeypatch)
+        result = runner.invoke(cli, ["delete", "Chat", "5", "6", "--yaml"])
+        assert result.exit_code == 0
+        assert "dry_run: true" in result.output
+        assert calls == []
+
+    def test_confirmed_send_writes_intent_and_outcome(
+        self, runner, monkeypatch, tmp_path
+    ):
+        import json
+
+        import tg_cli.cli.tg as tg_mod
+
+        monkeypatch.setenv("DATA_DIR", str(tmp_path))
+
+        class FakeMsg:
+            id = 7
+
+        class FakeClient:
+            async def send_message(self, chat, message, reply_to=None, **kwargs):
+                return FakeMsg()
+
+        @asynccontextmanager
+        async def fake_connect():
+            yield FakeClient()
+
+        monkeypatch.setattr(tg_mod, "connect", fake_connect)
+        result = runner.invoke(cli, ["send", "Chat", "запись в журнал", "--confirm"])
+        assert result.exit_code == 0
+        records = [
+            json.loads(line)
+            for line in (tmp_path / "mutations.log").read_text().splitlines()
+        ]
+        assert [r["phase"] for r in records] == ["intent", "done"]
+        assert records[0]["op"] == "send"
+        assert records[1]["status"] == "ok"
+        assert records[0]["id"] == records[1]["id"]
+
+    def test_journal_failure_blocks_mutation(self, runner, monkeypatch):
+        """Fail-closed: no audit record — no Telegram call (#26)."""
+        import tg_cli.cli.tg as tg_mod
+
+        calls = self._no_connect(monkeypatch)
+        monkeypatch.setattr(tg_mod, "_audit_write", lambda record: False)
+        result = runner.invoke(cli, ["send", "Chat", "hello", "--confirm"])
+        assert result.exit_code == 1
+        assert calls == []
+
+    def test_failed_action_recorded(self, runner, monkeypatch, tmp_path):
+        import json
+
+        import tg_cli.cli.tg as tg_mod
+
+        monkeypatch.setenv("DATA_DIR", str(tmp_path))
+
+        @asynccontextmanager
+        async def broken_connect():
+            raise RuntimeError("network down")
+            yield  # pragma: no cover
+
+        monkeypatch.setattr(tg_mod, "connect", broken_connect)
+        result = runner.invoke(cli, ["send", "Chat", "hello", "--confirm"])
+        assert result.exit_code == 1
+        records = [
+            json.loads(line)
+            for line in (tmp_path / "mutations.log").read_text().splitlines()
+        ]
+        assert records[-1]["status"] == "failed"
+
+
+class TestPermissions:
+    """#28 — private modes regardless of umask (POSIX)."""
+
+    def test_data_dir_and_db_private(self, monkeypatch, tmp_path):
+        import os
+        import sys
+
+        if sys.platform == "win32":
+            return
+        old_umask = os.umask(0o022)
+        try:
+            monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+            monkeypatch.delenv("DATA_DIR", raising=False)
+            monkeypatch.delenv("DB_PATH", raising=False)
+            import tg_cli.config as cfg
+            from tg_cli.db import MessageDB
+
+            d = cfg.get_data_dir()
+            assert (d.stat().st_mode & 0o777) == 0o700
+            db = MessageDB(cfg.get_db_path())
+            db.close()
+            assert (cfg.get_db_path().stat().st_mode & 0o777) == 0o600
+        finally:
+            os.umask(old_umask)
+
+    def test_rerun_fixes_env_perms(self, monkeypatch, tmp_path):
+        import sys
+
+        if sys.platform == "win32":
+            return
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+        monkeypatch.delenv("DATA_DIR", raising=False)
+        import tg_cli.config as cfg
+
+        d = cfg.get_data_dir()
+        env = d / ".env"
+        env.write_text("TG_API_ID=1\n")
+        env.chmod(0o644)  # simulate a pre-existing unsafe file
+        cfg.get_data_dir()  # re-entry fixes it
+        assert (env.stat().st_mode & 0o777) == 0o600

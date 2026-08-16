@@ -1,3 +1,6 @@
 # Refresh the local Telegram cache every 15 minutes.
-# Adjust the path to uv and the working directory for your environment.
-*/15 * * * * cd /path/to/tg-cli && /path/to/uv run tg refresh --yaml >> /tmp/tg-refresh.log 2>&1
+# Credentials are read from the protected data-dir .env automatically —
+# never put TG_API_ID/TG_API_HASH into the crontab.
+# The log lives inside the private data dir, not in world-readable /tmp.
+*/15 * * * * "$HOME/.local/bin/tg" refresh --yaml >> "$HOME/Library/Application Support/tg-cli/refresh.log" 2>&1
+# Linux data dir: "$HOME/.local/share/tg-cli/refresh.log"

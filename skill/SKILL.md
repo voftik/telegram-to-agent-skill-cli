@@ -20,10 +20,12 @@ local and cheap; only sync and file download touch Telegram.
 
 ## Hard rules
 
-1. **Read-only by default.** Sending is a two-step ritual: show the exact
-   text to the user, get an explicit "yes" **in this session**, only then
-   `tg send CHAT "text" --confirm`. Without `--confirm` the command is a
-   dry-run — use that for previews. Never invent a reason to send.
+1. **Read-only by default.** Every write to Telegram — `send`, `edit`,
+   `delete` — is a two-step ritual: show the exact text/operation to the
+   user, get an explicit "yes" **in this session**, only then re-run with
+   `--confirm`. Without `--confirm` all three are dry-runs — use that for
+   previews. Confirmed mutations are journaled to `mutations.log`. Never
+   invent a reason to send, edit or delete.
 2. **Default depth: 7 days or 200 messages**, whichever is smaller. If the
    task seems to need more, run `tg brief CHAT` first, show the numbers and
    ask the user how deep to go.

@@ -103,3 +103,53 @@ class TestExtractText:
         p = tmp_path / "broken.docx"
         p.write_bytes(b"not a zip at all")
         assert extract_text(p) is None
+
+
+class TestResourceBudgets:
+    """#30 — untrusted inputs must not exhaust RAM/disk/CPU."""
+
+    def test_zip_bomb_docx_rejected(self, tmp_path):
+        import pytest as _pytest
+
+        from tg_cli.textextract import ExtractionRejected
+
+        p = tmp_path / "bomb.docx"
+        with zipfile.ZipFile(p, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("word/document.xml", "A" * (60 * 1024 * 1024))
+        with _pytest.raises(ExtractionRejected):
+            extract_text(p)
+
+    def test_high_ratio_member_rejected(self, tmp_path):
+        import pytest as _pytest
+
+        from tg_cli import textextract as te
+
+        p = tmp_path / "ratio.docx"
+        with zipfile.ZipFile(p, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("word/document.xml", "B" * (te.MAX_COMPRESSION_RATIO * 200_000))
+        with _pytest.raises(te.ExtractionRejected):
+            extract_text(p)
+
+    def test_too_many_members_rejected(self, tmp_path, monkeypatch):
+        import pytest as _pytest
+
+        from tg_cli import textextract as te
+
+        monkeypatch.setattr(te, "MAX_ZIP_MEMBERS", 5)
+        p = tmp_path / "many.docx"
+        with zipfile.ZipFile(p, "w") as zf:
+            for i in range(10):
+                zf.writestr(f"member{i}.xml", "x")
+            zf.writestr("word/document.xml", "<w/>")
+        with _pytest.raises(te.ExtractionRejected):
+            extract_text(p)
+
+    def test_plain_file_read_capped(self, tmp_path, monkeypatch):
+        from tg_cli import textextract as te
+
+        monkeypatch.setattr(te, "MAX_MEMBER_BYTES", 100)
+        p = tmp_path / "big.txt"
+        p.write_text("й" * 10_000, encoding="utf-8")
+        text = extract_text(p)
+        assert text is not None
+        assert len(text.encode("utf-8")) <= 101

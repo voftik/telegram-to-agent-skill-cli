@@ -60,6 +60,64 @@ def _run_async(coro):
         raise SystemExit(1) from None
 
 
+def _audit_write(record: dict) -> bool:
+    """Append one JSONL record to the durable mutation journal (#26)."""
+    import json as _json
+    import os as _os
+    from datetime import datetime, timezone
+
+    from ..config import get_data_dir, harden_path
+
+    payload = {"ts": datetime.now(timezone.utc).isoformat(), **record}
+    try:
+        path = get_data_dir() / "mutations.log"
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(_json.dumps(payload, ensure_ascii=False) + "\n")
+            f.flush()
+            _os.fsync(f.fileno())
+        harden_path(path)
+        return True
+    except OSError as e:
+        console.print(f"[red]✗ mutation journal write failed: {e}[/red]")
+        return False
+
+
+def _mutation_guard(
+    op: str, confirm: bool, preview: dict, *, as_json: bool, as_yaml: bool
+) -> str | None:
+    """Shared write-command pipeline (#26): dry-run preview without
+    --confirm; with it — a durable intent record BEFORE touching Telegram.
+    Fail-closed: no journal, no mutation. Returns the audit id, or None
+    when the command must stop after showing the preview."""
+    if not confirm:
+        payload = {"dry_run": True, "operation": op, **preview}
+        if emit_structured(payload, as_json=as_json, as_yaml=as_yaml):
+            return None
+        console.print(f"[yellow]DRY-RUN — no {op} performed.[/yellow]")
+        for key, value in preview.items():
+            console.print(f"  {key}: {value}")
+        console.print("[dim]Re-run with --confirm to actually do it.[/dim]")
+        return None
+
+    import uuid
+
+    audit_id = uuid.uuid4().hex[:12]
+    if not _audit_write({"id": audit_id, "op": op, "phase": "intent", **preview}):
+        raise SystemExit(1)
+    return audit_id
+
+
+def _finish_mutation(audit_id: str, run):
+    """Run the confirmed action; always record the outcome."""
+    try:
+        result = run()
+    except BaseException:
+        _audit_write({"id": audit_id, "phase": "done", "status": "failed"})
+        raise
+    _audit_write({"id": audit_id, "phase": "done", "status": "ok"})
+    return result
+
+
 @click.group("tg")
 def tg_group():
     """Telegram operations — connect, fetch, sync, listen."""
@@ -490,23 +548,11 @@ def tg_send(
     "yes" before re-running with --confirm. Every real send is logged to
     <data_dir>/sent.log.
     """
-    if not confirm:
-        payload = {
-            "sent": False,
-            "dry_run": True,
-            "chat": chat,
-            "message": message,
-        }
-        if reply is not None:
-            payload["reply_to"] = reply
-        if emit_structured(payload, as_json=as_json, as_yaml=as_yaml):
-            return
-        console.print("[yellow]DRY-RUN \u2014 nothing was sent.[/yellow]")
-        console.print(f"  chat: [cyan]{chat}[/cyan]")
-        if reply is not None:
-            console.print(f"  reply_to: {reply}")
-        console.print(f"  text: {message}")
-        console.print("[dim]Re-run with --confirm to actually send.[/dim]")
+    preview = {"sent": False, "chat": chat, "message": message}
+    if reply is not None:
+        preview["reply_to"] = reply
+    audit_id = _mutation_guard("send", confirm, preview, as_json=as_json, as_yaml=as_yaml)
+    if audit_id is None:
         return
 
     async def _run():
@@ -519,7 +565,7 @@ def tg_send(
             )
             return msg
 
-    msg = _run_async(_run())
+    msg = _finish_mutation(audit_id, lambda: _run_async(_run()))
     _log_sent(chat, msg.id, message)
     payload = {"sent": True, "msg_id": msg.id, "chat": chat}
     if reply is not None:
@@ -759,9 +805,34 @@ def tg_files(
 @click.argument("msg_id", type=int)
 @click.argument("new_text")
 @click.option("--no-preview", is_flag=True, help="Disable link preview")
+@click.option(
+    "--confirm",
+    is_flag=True,
+    help="Actually edit. Without this flag the command is a dry-run preview.",
+)
 @structured_output_options
-def tg_edit(chat: str, msg_id: int, new_text: str, no_preview: bool, as_json: bool, as_yaml: bool):
-    """Edit a previously sent message. CHAT MSG_ID NEW_TEXT."""
+def tg_edit(
+    chat: str,
+    msg_id: int,
+    new_text: str,
+    no_preview: bool,
+    confirm: bool,
+    as_json: bool,
+    as_yaml: bool,
+):
+    """Edit a previously sent message. CHAT MSG_ID NEW_TEXT.
+
+    Safety: dry-run without --confirm; confirmed edits are journaled (#26).
+    """
+    audit_id = _mutation_guard(
+        "edit",
+        confirm,
+        {"chat": chat, "msg_id": msg_id, "new_text": new_text},
+        as_json=as_json,
+        as_yaml=as_yaml,
+    )
+    if audit_id is None:
+        return
 
     async def _run():
         async with connect() as client:
@@ -784,7 +855,7 @@ def tg_edit(chat: str, msg_id: int, new_text: str, no_preview: bool, as_json: bo
                 db.conn.commit()
             return result
 
-    _run_async(_run())
+    _finish_mutation(audit_id, lambda: _run_async(_run()))
     payload = {"edited": True, "msg_id": msg_id, "chat": chat}
     if emit_structured(payload, as_json=as_json, as_yaml=as_yaml):
         return
@@ -794,9 +865,29 @@ def tg_edit(chat: str, msg_id: int, new_text: str, no_preview: bool, as_json: bo
 @tg_group.command("delete")
 @click.argument("chat")
 @click.argument("msg_ids", nargs=-1, type=int, required=True)
+@click.option(
+    "--confirm",
+    is_flag=True,
+    help="Actually delete. Without this flag the command is a dry-run preview.",
+)
 @structured_output_options
-def tg_delete(chat: str, msg_ids: tuple[int, ...], as_json: bool, as_yaml: bool):
-    """Delete one or more messages. CHAT MSG_ID [MSG_ID ...]."""
+def tg_delete(
+    chat: str, msg_ids: tuple[int, ...], confirm: bool, as_json: bool, as_yaml: bool
+):
+    """Delete one or more messages. CHAT MSG_ID [MSG_ID ...].
+
+    Safety: dry-run without --confirm; confirmed deletions are journaled
+    and mirrored into the local index (#26, #24).
+    """
+    audit_id = _mutation_guard(
+        "delete",
+        confirm,
+        {"chat": chat, "msg_ids": list(msg_ids)},
+        as_json=as_json,
+        as_yaml=as_yaml,
+    )
+    if audit_id is None:
+        return
 
     async def _run():
         async with connect() as client:
@@ -810,7 +901,7 @@ def tg_delete(chat: str, msg_ids: tuple[int, ...], as_json: bool, as_yaml: bool)
                 res = db.delete_messages(marked_peer_id(entity), list(msg_ids))
             remove_local_files(res["files"])
 
-    _run_async(_run())
+    _finish_mutation(audit_id, lambda: _run_async(_run()))
     payload = {"deleted": True, "msg_ids": list(msg_ids), "chat": chat}
     if emit_structured(payload, as_json=as_json, as_yaml=as_yaml):
         return

@@ -207,6 +207,10 @@ class MessageDB:
             self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(str(self.db_path))
+        from .config import harden_path
+
+        # chmod before WAL side-files appear — they inherit these modes (#28)
+        harden_path(self.db_path)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA busy_timeout = 30000")
         # The whole open sequence (WAL switch, base DDL, migration) races

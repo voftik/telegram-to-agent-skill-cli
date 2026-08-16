@@ -96,6 +96,22 @@ def get_session_path() -> str:
     return str(data_dir / name)
 
 
+def harden_path(path: Path, *, directory: bool = False) -> None:
+    """Best-effort private permissions on POSIX (#28): 0700 dirs, 0600 files.
+
+    The data dir holds full-account credentials and personal history — it
+    must be private regardless of the caller's umask. No-op on Windows.
+    """
+    if os.name == "nt":
+        return
+    try:
+        mode = 0o700 if directory else 0o600
+        if path.exists() and (path.stat().st_mode & 0o777) != mode:
+            path.chmod(mode)
+    except OSError:
+        pass
+
+
 def get_data_dir() -> Path:
     """Return data directory, create if not exists."""
     raw = os.environ.get("DATA_DIR", "")
@@ -104,6 +120,10 @@ def get_data_dir() -> Path:
     else:
         d = _default_data_home() / APP_NAME
     d.mkdir(parents=True, exist_ok=True)
+    harden_path(d, directory=True)
+    env_file = d / ".env"
+    if env_file.exists():
+        harden_path(env_file)
     return d
 
 

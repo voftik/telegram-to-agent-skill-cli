@@ -5,7 +5,8 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-WorkingDirectory=/path/to/tg-cli
-Environment=TG_API_ID=123456
-Environment=TG_API_HASH=your_telegram_app_hash
-ExecStart=/path/to/uv run tg refresh --yaml
+# Credentials come from the protected data-dir .env (0600) which the CLI
+# loads itself — do NOT inline TG_API_ID/TG_API_HASH here: unit files are
+# world-readable.
+ExecStart=%h/.local/bin/tg refresh --yaml
+# Output goes to the systemd journal (private per-user) — no /tmp logs.

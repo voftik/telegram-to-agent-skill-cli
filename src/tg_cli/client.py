@@ -111,11 +111,23 @@ async def connect() -> AsyncGenerator[TelegramClient, None]:
         system_lang_code=_SYSTEM_LANG_CODE,
     )
     await c.start()
+    _harden_session_files()
     await _cache_me(c)
     try:
         yield c
     finally:
         await c.disconnect()
+
+
+def _harden_session_files() -> None:
+    """Session file = full account access; keep it 0600 (#28)."""
+    from pathlib import Path
+
+    from .config import harden_path
+
+    base = Path(get_session_path())
+    for suffix in (".session", ".session-journal"):
+        harden_path(base.with_suffix(suffix))
 
 
 async def check_auth() -> dict:
@@ -176,7 +188,11 @@ async def _cache_me(client: TelegramClient) -> None:
             "username": me.username,
             "name": _get_sender_name(me),
         }
-        (get_data_dir() / "me.json").write_text(json.dumps(payload, ensure_ascii=False))
+        me_path = get_data_dir() / "me.json"
+        me_path.write_text(json.dumps(payload, ensure_ascii=False))
+        from .config import harden_path
+
+        harden_path(me_path)
     except Exception as e:  # pragma: no cover - never break a real command
         log.debug("me.json cache failed: %s", e)
 
@@ -562,6 +578,7 @@ async def download_attachments(
     kinds: list[str] | None = None,
     hours: int | None = None,
     limit: int = 20,
+    max_bytes: int = 100 * 1024 * 1024,
 ) -> list[dict]:
     """Download pending attachments for a chat and extract text where possible.
 
@@ -582,6 +599,7 @@ async def download_attachments(
 
     rows = db.get_attachments(chat_id=chat_id, hours=hours, limit=max(limit * 5, limit))
     targets = []
+    rejected: list[dict] = []
     for row in rows:
         if msg_ids and row["msg_id"] not in msg_ids:
             continue
@@ -589,11 +607,22 @@ async def download_attachments(
             continue
         if row["local_path"] and Path(row["local_path"]).exists():
             continue
+        if row["size_bytes"] and row["size_bytes"] > max_bytes:
+            # Budget check happens BEFORE any bytes are transferred (#30).
+            rejected.append(
+                {
+                    "msg_id": row["msg_id"],
+                    "kind": row["kind"],
+                    "status": "rejected",
+                    "reason": f"size {row['size_bytes']} > limit {max_bytes}",
+                }
+            )
+            continue
         targets.append(row)
         if len(targets) >= limit:
             break
     if not targets:
-        return []
+        return rejected
 
     files_dir = get_data_dir() / "files" / str(chat_id)
     files_dir.mkdir(parents=True, exist_ok=True)
@@ -629,17 +658,42 @@ async def download_attachments(
             except FloodWaitError as e:
                 console.print(f"[yellow]⚠ rate limit, waiting {e.seconds}s...[/yellow]")
                 await asyncio.sleep(e.seconds + random.uniform(1, 3))
+                target.unlink(missing_ok=True)  # drop the partial file (#30)
+                continue
+            except Exception as e:
+                log.warning("download failed for msg %s: %s", msg.id, e)
+                target.unlink(missing_ok=True)
+                results.append(
+                    {"msg_id": msg.id, "kind": row["kind"], "status": "failed",
+                     "reason": str(e)}
+                )
                 continue
             if not saved:
                 continue
             saved_path = Path(saved)
-            sha = hashlib.sha256(saved_path.read_bytes()).hexdigest()
+            from .config import harden_path
+
+            harden_path(saved_path)
+            # Streaming hash — a large video must not be read into RAM (#30).
+            hasher = hashlib.sha256()
+            with open(saved_path, "rb") as fh:
+                for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                    hasher.update(chunk)
+            sha = hasher.hexdigest()
             text_path = None
+            extract_status = None
             if extractable(saved_path):
-                text = extract_text(saved_path)
+                from .textextract import ExtractionRejected
+
+                try:
+                    text = extract_text(saved_path)
+                except ExtractionRejected as e:
+                    extract_status = f"extraction rejected: {e}"
+                    text = None
                 if text:
                     tp = saved_path.with_name(saved_path.name + ".txt")
                     tp.write_text(text, encoding="utf-8")
+                    harden_path(tp)
                     text_path = str(tp)
             db.mark_attachment_downloaded(
                 chat_id,
@@ -649,16 +703,18 @@ async def download_attachments(
                 text_path=text_path,
                 file_name=saved_path.name,
             )
-            results.append(
-                {
-                    "msg_id": msg.id,
-                    "kind": row["kind"],
-                    "local_path": str(saved_path),
-                    "text_path": text_path,
-                    "sha256": sha,
-                }
-            )
-    return results
+            entry = {
+                "msg_id": msg.id,
+                "kind": row["kind"],
+                "status": "downloaded",
+                "local_path": str(saved_path),
+                "text_path": text_path,
+                "sha256": sha,
+            }
+            if extract_status:
+                entry["note"] = extract_status
+            results.append(entry)
+    return results + rejected
 
 
 async def sync_all(
