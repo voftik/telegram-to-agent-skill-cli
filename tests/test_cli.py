@@ -547,7 +547,7 @@ class TestSend:
             yield FakeClient()
 
         monkeypatch.setattr(tg_mod, "connect", fake_connect)
-        result = runner.invoke(cli, ["send", "TestChat", "Hello!"])
+        result = runner.invoke(cli, ["send", "TestChat", "Hello!", "--confirm"])
         assert result.exit_code == 0
         assert "Message sent" in result.output
         assert "42" in result.output
@@ -568,7 +568,7 @@ class TestSend:
             yield FakeClient()
 
         monkeypatch.setattr(tg_mod, "connect", fake_connect)
-        result = runner.invoke(cli, ["send", "TestChat", "Reply!", "--reply", "12345"])
+        result = runner.invoke(cli, ["send", "TestChat", "Reply!", "--reply", "12345", "--confirm"])
         assert result.exit_code == 0
 
     def test_send_yaml(self, runner, monkeypatch):
@@ -586,7 +586,7 @@ class TestSend:
             yield FakeClient()
 
         monkeypatch.setattr(tg_mod, "connect", fake_connect)
-        result = runner.invoke(cli, ["send", "TestChat", "Hello!", "--yaml"])
+        result = runner.invoke(cli, ["send", "TestChat", "Hello!", "--confirm", "--yaml"])
         assert result.exit_code == 0
         data = yaml.safe_load(result.output)
         assert data["ok"] is True
@@ -749,3 +749,41 @@ class TestInfo:
         result = runner.invoke(cli, ["info", "Missing"])
         assert result.exit_code == 0
         assert "Could not find chat" in result.output
+
+
+class TestSendDryRun:
+    def test_default_is_dry_run(self, runner):
+        """Without --confirm nothing connects and nothing is sent."""
+        result = runner.invoke(cli, ["send", "TestChat", "Hello!"])
+        assert result.exit_code == 0
+        assert "DRY-RUN" in result.output
+        assert "Message sent" not in result.output
+
+    def test_dry_run_yaml_payload(self, runner):
+        result = runner.invoke(cli, ["send", "TestChat", "Hello!", "--yaml"])
+        assert result.exit_code == 0
+        assert "dry_run: true" in result.output
+        assert "sent: false" in result.output
+
+    def test_confirmed_send_is_logged(self, runner, monkeypatch, tmp_path):
+        import tg_cli.cli.tg as tg_mod
+
+        monkeypatch.setenv("DATA_DIR", str(tmp_path))
+
+        class FakeMsg:
+            id = 7
+
+        class FakeClient:
+            async def send_message(self, chat, message, reply_to=None, **kwargs):
+                return FakeMsg()
+
+        @asynccontextmanager
+        async def fake_connect():
+            yield FakeClient()
+
+        monkeypatch.setattr(tg_mod, "connect", fake_connect)
+        result = runner.invoke(cli, ["send", "TestChat", "Привет, лог!", "--confirm"])
+        assert result.exit_code == 0
+        log_text = (tmp_path / "sent.log").read_text()
+        assert "TestChat" in log_text
+        assert "Привет, лог!" in log_text

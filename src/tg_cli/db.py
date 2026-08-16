@@ -327,7 +327,53 @@ class MessageDB:
         hours: int | None = None,
         limit: int = 50,
     ) -> list[dict]:
-        """Search messages by keyword."""
+        """Search messages: FTS5 first (prefixes `слово*`, phrases, OR),
+        falling back to a LIKE substring scan when FTS finds nothing or
+        the query uses characters FTS5 cannot parse."""
+        try:
+            results = self._search_fts(keyword, chat_id, sender, hours, limit)
+        except sqlite3.OperationalError:
+            results = []  # fts5 query syntax error — treat as no FTS hits
+        if results:
+            return results
+        return self._search_like(keyword, chat_id, sender, hours, limit)
+
+    def _search_fts(
+        self,
+        keyword: str,
+        chat_id: int | None,
+        sender: str | None,
+        hours: int | None,
+        limit: int,
+    ) -> list[dict]:
+        query = (
+            "SELECT m.* FROM messages_fts f JOIN messages m ON m.id = f.rowid"
+            " WHERE messages_fts MATCH ?"
+        )
+        params: list[Any] = [keyword]
+        if chat_id is not None:
+            query += " AND m.chat_id = ?"
+            params.append(chat_id)
+        if sender is not None:
+            query += " AND m.sender_name LIKE ?"
+            params.append(f"%{sender}%")
+        if hours is not None:
+            cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+            query += " AND m.timestamp >= ?"
+            params.append(cutoff)
+        query += " ORDER BY m.timestamp DESC LIMIT ?"
+        params.append(limit)
+        rows = self.conn.execute(query, params).fetchall()
+        return [dict(r) for r in rows]
+
+    def _search_like(
+        self,
+        keyword: str,
+        chat_id: int | None,
+        sender: str | None,
+        hours: int | None,
+        limit: int,
+    ) -> list[dict]:
         query = "SELECT * FROM messages WHERE content LIKE ?"
         params: list[Any] = [f"%{keyword}%"]
         if chat_id is not None:
@@ -548,6 +594,196 @@ class MessageDB:
             params,
         ).fetchall()
         return [dict(r) for r in rows]
+
+    # ─────────────────── fork additions: brief / links / thread / style ───────────────────
+
+    def brief(self, chat_id: int) -> dict:
+        """Chat passport: volume, activity, top senders, attachments, links."""
+        totals = self.conn.execute(
+            "SELECT COUNT(*) AS total, MIN(timestamp) AS first_msg, MAX(timestamp) AS last_msg"
+            " FROM messages WHERE chat_id = ?",
+            (chat_id,),
+        ).fetchone()
+
+        def _count_since(days: int) -> int:
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+            return self.conn.execute(
+                "SELECT COUNT(*) FROM messages WHERE chat_id = ? AND timestamp >= ?",
+                (chat_id, cutoff),
+            ).fetchone()[0]
+
+        top_days = self.conn.execute(
+            "SELECT substr(timestamp, 1, 10) AS day, COUNT(*) AS msg_count"
+            " FROM messages WHERE chat_id = ? GROUP BY day ORDER BY msg_count DESC LIMIT 3",
+            (chat_id,),
+        ).fetchall()
+        attachments = self.conn.execute(
+            "SELECT kind, COUNT(*) AS n FROM attachments WHERE chat_id = ? GROUP BY kind",
+            (chat_id,),
+        ).fetchall()
+        links = self.conn.execute(
+            "SELECT kind, COUNT(*) AS n FROM links WHERE chat_id = ? GROUP BY kind",
+            (chat_id,),
+        ).fetchall()
+        return {
+            "total": totals["total"],
+            "first_msg": totals["first_msg"],
+            "last_msg": totals["last_msg"],
+            "msgs_7d": _count_since(7),
+            "msgs_30d": _count_since(30),
+            "top_days": [dict(r) for r in top_days],
+            "top_senders": self.top_senders(chat_id=chat_id, limit=5),
+            "attachments": {r["kind"]: r["n"] for r in attachments},
+            "links": {r["kind"]: r["n"] for r in links},
+        }
+
+    def get_links(
+        self,
+        chat_id: int | None = None,
+        hours: int | None = None,
+        kind: str | None = None,
+        limit: int = 100,
+    ) -> list[dict]:
+        """Shared links, newest first, with message context."""
+        query = """SELECT l.chat_id, l.msg_id, l.url, l.fetch_url, l.kind,
+                          m.timestamp, m.sender_name, m.chat_name,
+                          substr(coalesce(m.content, ''), 1, 160) AS snippet
+                   FROM links l
+                   LEFT JOIN messages m ON m.chat_id = l.chat_id AND m.msg_id = l.msg_id
+                   WHERE 1=1"""
+        params: list[Any] = []
+        if chat_id is not None:
+            query += " AND l.chat_id = ?"
+            params.append(chat_id)
+        if kind is not None:
+            query += " AND l.kind = ?"
+            params.append(kind)
+        if hours is not None:
+            cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+            query += " AND m.timestamp >= ?"
+            params.append(cutoff)
+        query += " ORDER BY m.timestamp DESC LIMIT ?"
+        params.append(limit)
+        return [dict(r) for r in self.conn.execute(query, params).fetchall()]
+
+    def get_attachments(
+        self,
+        chat_id: int | None = None,
+        hours: int | None = None,
+        kind: str | None = None,
+        limit: int = 200,
+        only_pending: bool = False,
+    ) -> list[dict]:
+        """Attachment metadata, newest first. only_pending → not yet downloaded."""
+        query = """SELECT a.*, m.timestamp, m.sender_name, m.chat_name,
+                          substr(coalesce(m.content, ''), 1, 120) AS snippet
+                   FROM attachments a
+                   LEFT JOIN messages m ON m.chat_id = a.chat_id AND m.msg_id = a.msg_id
+                   WHERE 1=1"""
+        params: list[Any] = []
+        if chat_id is not None:
+            query += " AND a.chat_id = ?"
+            params.append(chat_id)
+        if kind is not None:
+            query += " AND a.kind = ?"
+            params.append(kind)
+        if hours is not None:
+            cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+            query += " AND m.timestamp >= ?"
+            params.append(cutoff)
+        if only_pending:
+            query += " AND a.local_path IS NULL"
+        query += " ORDER BY m.timestamp DESC LIMIT ?"
+        params.append(limit)
+        return [dict(r) for r in self.conn.execute(query, params).fetchall()]
+
+    def mark_attachment_downloaded(
+        self,
+        chat_id: int,
+        msg_id: int,
+        *,
+        local_path: str,
+        sha256: str,
+        text_path: str | None = None,
+        file_name: str | None = None,
+    ) -> None:
+        self.conn.execute(
+            """UPDATE attachments
+               SET local_path = ?, sha256 = ?, text_path = ?,
+                   file_name = COALESCE(?, file_name),
+                   downloaded_at = ?
+               WHERE chat_id = ? AND msg_id = ?""",
+            (
+                local_path,
+                sha256,
+                text_path,
+                file_name,
+                datetime.now(timezone.utc).isoformat(),
+                chat_id,
+                msg_id,
+            ),
+        )
+        self.conn.commit()
+
+    def get_thread(self, chat_id: int, msg_id: int, max_hops: int = 200) -> list[dict]:
+        """Reconstruct a reply thread: climb to the root, then collect all
+        descendants, returned in chronological order."""
+        root_id = msg_id
+        for _ in range(max_hops):
+            row = self.conn.execute(
+                "SELECT reply_to_msg_id FROM messages WHERE chat_id = ? AND msg_id = ?",
+                (chat_id, root_id),
+            ).fetchone()
+            parent = row["reply_to_msg_id"] if row else None
+            if not parent:
+                break
+            # Follow even into a parent that was never synced (poll, service
+            # message, out of sync window): it becomes a *virtual* root, so
+            # sibling replies to it are still collected below.
+            root_id = parent
+            exists = self.conn.execute(
+                "SELECT 1 FROM messages WHERE chat_id = ? AND msg_id = ?",
+                (chat_id, parent),
+            ).fetchone()
+            if not exists:
+                break  # cannot climb past a gap in the local cache
+
+        rows = self.conn.execute(
+            """WITH RECURSIVE thread(mid) AS (
+                   VALUES(?)
+                   UNION
+                   SELECT m.msg_id FROM messages m
+                   JOIN thread t ON m.reply_to_msg_id = t.mid
+                   WHERE m.chat_id = ?
+               )
+               SELECT m.* FROM messages m
+               JOIN thread t ON m.msg_id = t.mid
+               WHERE m.chat_id = ?
+               ORDER BY m.timestamp ASC""",
+            (root_id, chat_id, chat_id),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_style_corpus(
+        self,
+        sender_id: int,
+        chat_id: int | None = None,
+        limit: int = 500,
+        min_len: int = 15,
+    ) -> list[dict]:
+        """My own messages, newest first — the corpus for style calibration."""
+        query = (
+            "SELECT content, chat_name, timestamp FROM messages"
+            " WHERE sender_id = ? AND content IS NOT NULL"
+            " AND length(content) >= ? AND content NOT LIKE '/%'"
+        )
+        params: list[Any] = [sender_id, min_len]
+        if chat_id is not None:
+            query += " AND chat_id = ?"
+            params.append(chat_id)
+        query += " ORDER BY timestamp DESC LIMIT ?"
+        params.append(limit)
+        return [dict(r) for r in self.conn.execute(query, params).fetchall()]
 
     def close(self):
         self.conn.close()

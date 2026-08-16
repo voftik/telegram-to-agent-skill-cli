@@ -75,10 +75,47 @@ async def connect() -> AsyncGenerator[TelegramClient, None]:
         system_lang_code=_SYSTEM_LANG_CODE,
     )
     await c.start()
+    await _cache_me(c)
     try:
         yield c
     finally:
         await c.disconnect()
+
+
+async def _cache_me(client: TelegramClient) -> None:
+    """Best-effort cache of the account identity so offline commands
+    (e.g. `tg style`) know the user's sender_id without connecting."""
+    try:
+        import json
+
+        from .config import get_data_dir
+
+        me = await client.get_me()
+        if me is None:
+            return
+        payload = {
+            "id": me.id,
+            "username": me.username,
+            "name": _get_sender_name(me),
+        }
+        (get_data_dir() / "me.json").write_text(json.dumps(payload, ensure_ascii=False))
+    except Exception as e:  # pragma: no cover - never break a real command
+        log.debug("me.json cache failed: %s", e)
+
+
+def load_cached_me() -> dict | None:
+    """Read the cached account identity, or None when never connected."""
+    import json
+
+    from .config import get_data_dir
+
+    path = get_data_dir() / "me.json"
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
 
 
 async def list_chats(

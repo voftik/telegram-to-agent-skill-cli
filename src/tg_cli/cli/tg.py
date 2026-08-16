@@ -397,16 +397,46 @@ def tg_status(as_json: bool, as_yaml: bool):
 @click.argument("message")
 @click.option("-r", "--reply", type=int, default=None, help="Message ID to reply to")
 @click.option("--no-preview", is_flag=True, help="Disable link preview")
+@click.option(
+    "--confirm",
+    is_flag=True,
+    help="Actually send. Without this flag the command is a dry-run preview.",
+)
 @structured_output_options
 def tg_send(
     chat: str,
     message: str,
     reply: int | None,
     no_preview: bool,
+    confirm: bool,
     as_json: bool,
     as_yaml: bool,
 ):
-    """Send a MESSAGE to CHAT (name, username, or numeric ID)."""
+    """Send a MESSAGE to CHAT (name, username, or numeric ID).
+
+    Safety: without --confirm nothing is sent \u2014 the command prints a preview
+    and exits. Agents must show the text to the user and get an explicit
+    "yes" before re-running with --confirm. Every real send is logged to
+    <data_dir>/sent.log.
+    """
+    if not confirm:
+        payload = {
+            "sent": False,
+            "dry_run": True,
+            "chat": chat,
+            "message": message,
+        }
+        if reply is not None:
+            payload["reply_to"] = reply
+        if emit_structured(payload, as_json=as_json, as_yaml=as_yaml):
+            return
+        console.print("[yellow]DRY-RUN \u2014 nothing was sent.[/yellow]")
+        console.print(f"  chat: [cyan]{chat}[/cyan]")
+        if reply is not None:
+            console.print(f"  reply_to: {reply}")
+        console.print(f"  text: {message}")
+        console.print("[dim]Re-run with --confirm to actually send.[/dim]")
+        return
 
     async def _run():
         async with connect() as client:
@@ -419,12 +449,28 @@ def tg_send(
             return msg
 
     msg = asyncio.run(_run())
+    _log_sent(chat, msg.id, message)
     payload = {"sent": True, "msg_id": msg.id, "chat": chat}
     if reply is not None:
         payload["reply_to"] = reply
     if emit_structured(payload, as_json=as_json, as_yaml=as_yaml):
         return
     console.print(f"[green]\u2713[/green] Message sent (id: {msg.id})")
+
+
+def _log_sent(chat: str, msg_id: int, message: str) -> None:
+    """Append an audit line for every real send."""
+    from datetime import datetime, timezone
+
+    from ..config import get_data_dir
+
+    preview = message[:100].replace("\n", " ")
+    line = f"{datetime.now(timezone.utc).isoformat()}\t{chat}\t{msg_id}\t{preview}\n"
+    try:
+        with open(get_data_dir() / "sent.log", "a", encoding="utf-8") as f:
+            f.write(line)
+    except OSError as e:
+        console.print(f"[yellow]\u26a0 sent.log write failed: {e}[/yellow]")
 
 
 @tg_group.command("edit")

@@ -120,6 +120,203 @@ def search(
     console.print(f"\n[dim]Found {len(results)} messages{suffix}[/dim]")
 
 
+@query_group.command("brief")
+@click.argument("chat")
+@click.option("--sync-first", is_flag=True, help="Refresh this chat before building the brief")
+@click.option(
+    "--sync-limit",
+    default=5000,
+    show_default=True,
+    help="Max messages per chat when using --sync-first",
+)
+@structured_output_options
+def brief(chat: str, sync_first: bool, sync_limit: int, as_json: bool, as_yaml: bool):
+    """Chat passport: volume, activity spikes, top senders, files and links.
+
+    Agents should call this before deep-reading a chat to pick a sane depth.
+    """
+    _maybe_sync_first(chat, sync_first, sync_limit)
+
+    with MessageDB() as db:
+        chat_id = resolve_chat_id_or_print(db, chat)
+        if chat_id is None:
+            return
+        matches = db.find_chats(chat)
+        info = db.brief(chat_id)
+
+    info["chat_id"] = chat_id
+    info["chat_name"] = matches[0]["chat_name"] if matches else chat
+    if emit_structured(info, as_json=as_json, as_yaml=as_yaml):
+        return
+
+    console.print(f"[bold cyan]{info['chat_name']}[/bold cyan] (id: {chat_id})")
+    console.print(
+        f"  messages: [bold]{info['total']}[/bold]"
+        f"  (7d: {info['msgs_7d']}, 30d: {info['msgs_30d']})"
+    )
+    console.print(f"  period: {(info['first_msg'] or '')[:10]} … {(info['last_msg'] or '')[:10]}")
+    if info["top_days"]:
+        days = ", ".join(f"{d['day']} ({d['msg_count']})" for d in info["top_days"])
+        console.print(f"  peak days: {days}")
+    if info["top_senders"]:
+        senders = ", ".join(
+            f"{s['sender_name']} ({s['msg_count']})" for s in info["top_senders"]
+        )
+        console.print(f"  top senders: {senders}")
+    if info["attachments"]:
+        att = ", ".join(f"{k}: {v}" for k, v in sorted(info["attachments"].items()))
+        console.print(f"  attachments: {att}")
+    if info["links"]:
+        lnk = ", ".join(f"{k}: {v}" for k, v in sorted(info["links"].items()))
+        console.print(f"  links: {lnk}")
+
+
+@query_group.command("links")
+@click.argument("chat", required=False)
+@click.option("--hours", type=int, help="Only links within N hours")
+@click.option(
+    "--kind",
+    type=click.Choice(["gdoc", "gsheet", "gslides", "tme", "web"]),
+    help="Filter by link kind",
+)
+@click.option("-n", "--limit", default=100, show_default=True, help="Max results")
+@structured_output_options
+def links_cmd(
+    chat: str | None,
+    hours: int | None,
+    kind: str | None,
+    limit: int,
+    as_json: bool,
+    as_yaml: bool,
+):
+    """Links shared in chats, with agent-fetchable fetch_url.
+
+    For Google Docs/Sheets/Slides fetch_url points at the export endpoint —
+    fetch that, not the original url. kind=tme resolves via `tg thread`.
+    """
+    with MessageDB() as db:
+        chat_id = resolve_chat_id_or_print(db, chat)
+        if chat and chat_id is None:
+            return
+        results = db.get_links(chat_id=chat_id, hours=hours, kind=kind, limit=limit)
+
+    if emit_structured(results, as_json=as_json, as_yaml=as_yaml):
+        return
+    if not results:
+        console.print("[yellow]No links found.[/yellow]")
+        return
+    for r in results:
+        ts = (r.get("timestamp") or "")[:16]
+        console.print(
+            f"[dim]{ts}[/dim] [cyan]{r.get('chat_name') or ''}[/cyan]"
+            f" [{r['kind']}] {r['url']}"
+        )
+    console.print(f"\n[dim]{len(results)} links[/dim]")
+
+
+@query_group.command("thread")
+@click.argument("chat", required=False)
+@click.option("--msg-id", type=int, help="Message ID inside the thread")
+@click.option("--url", "tme_url", help="t.me/c/… link to a message")
+@structured_output_options
+def thread_cmd(
+    chat: str | None,
+    msg_id: int | None,
+    tme_url: str | None,
+    as_json: bool,
+    as_yaml: bool,
+):
+    """Reconstruct the reply thread around one message, in chronological order."""
+    import re as _re
+
+    if tme_url:
+        m = _re.search(r"t\.me/c/(\d+)/(\d+)", tme_url)
+        if not m:
+            if emit_error("bad_url", "Only t.me/c/<chat>/<msg> links are supported."):
+                raise SystemExit(1) from None
+            console.print("[red]Only t.me/c/<chat>/<msg> links are supported.[/red]")
+            return
+        resolved_chat_id, msg_id = int(m.group(1)), int(m.group(2))
+    else:
+        if not chat or msg_id is None:
+            if emit_error("missing_args", "Provide CHAT and --msg-id, or --url."):
+                raise SystemExit(1) from None
+            console.print("[red]Provide CHAT and --msg-id, or --url.[/red]")
+            return
+        with MessageDB() as db:
+            resolved = resolve_chat_id_or_print(db, chat)
+        if resolved is None:
+            return
+        resolved_chat_id = resolved
+
+    with MessageDB() as db:
+        msgs = db.get_thread(resolved_chat_id, msg_id)
+
+    if emit_structured(msgs, as_json=as_json, as_yaml=as_yaml):
+        return
+    if not msgs:
+        console.print("[yellow]Thread not found in local cache. Sync the chat first.[/yellow]")
+        return
+    for m2 in msgs:
+        ts = (m2.get("timestamp") or "")[:16]
+        sender = m2.get("sender_name") or "Unknown"
+        marker = "↳ " if m2.get("reply_to_msg_id") else ""
+        console.print(
+            f"[dim]{ts}[/dim] {marker}[bold]{sender}[/bold]:"
+            f" {(m2.get('content') or '')[:300]}"
+        )
+    console.print(f"\n[dim]{len(msgs)} messages in thread[/dim]")
+
+
+@query_group.command("style")
+@click.option("-c", "--chat", help="Restrict corpus to one chat")
+@click.option("-n", "--limit", default=500, show_default=True, help="Max messages")
+@click.option(
+    "--min-len",
+    default=15,
+    show_default=True,
+    help="Skip messages shorter than N characters",
+)
+@structured_output_options
+def style_cmd(
+    chat: str | None,
+    limit: int,
+    min_len: int,
+    as_json: bool,
+    as_yaml: bool,
+):
+    """My own outgoing messages — a corpus for reply style calibration."""
+    from ..client import load_cached_me
+
+    me = load_cached_me()
+    if not me:
+        if emit_error(
+            "no_identity",
+            "Account identity unknown. Run `tg whoami` once, then retry.",
+        ):
+            raise SystemExit(1) from None
+        console.print("[red]Account identity unknown. Run `tg whoami` once, then retry.[/red]")
+        return
+
+    with MessageDB() as db:
+        chat_id = resolve_chat_id_or_print(db, chat)
+        if chat and chat_id is None:
+            return
+        corpus = db.get_style_corpus(
+            me["id"], chat_id=chat_id, limit=limit, min_len=min_len
+        )
+
+    if emit_structured({"me": me, "count": len(corpus), "messages": corpus},
+                       as_json=as_json, as_yaml=as_yaml):
+        return
+    if not corpus:
+        console.print("[yellow]No own messages in local cache yet.[/yellow]")
+        return
+    for m3 in corpus[:50]:
+        console.print(f"[dim]{(m3.get('timestamp') or '')[:10]}[/dim] {m3['content'][:200]}")
+    console.print(f"\n[dim]{len(corpus)} messages (showing up to 50; use --yaml for all)[/dim]")
+
+
 @query_group.command("recent")
 @click.option("-c", "--chat", help="Filter by chat name")
 @click.option("-s", "--sender", help="Filter by sender name")
