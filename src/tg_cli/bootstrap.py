@@ -68,37 +68,73 @@ def systemd_unit_path() -> Path:
     return Path.home() / ".config" / "systemd" / "user" / _UNIT_NAME
 
 
-def render_plist(tg_bin: str, log_path: Path) -> str:
+def runtime_env() -> dict[str, str]:
+    """Non-secret state locators the autostart worker must inherit (#34).
+
+    A launchd/systemd worker starts with a scrubbed environment; without
+    DATA_DIR it would look for the marker in the default location, miss it
+    and disarm itself without ever syncing. Secrets stay in the protected
+    data-dir .env — never in world-readable unit files.
+    """
+    import os
+
+    env = {"DATA_DIR": str(get_data_dir())}
+    for key in ("DB_PATH", "TG_SESSION_NAME"):
+        if os.environ.get(key):
+            env[key] = os.environ[key]
+    return env
+
+
+def render_plist(tg_bin: str, log_path: Path, env: dict[str, str] | None = None) -> str:
+    from xml.sax.saxutils import escape
+
+    env_items = "".join(
+        f"\n        <key>{escape(k)}</key><string>{escape(v)}</string>"
+        for k, v in (env or {}).items()
+    )
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>Label</key><string>{LABEL}</string>
+    <key>Label</key><string>{escape(LABEL)}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>{tg_bin}</string>
+        <string>{escape(tg_bin)}</string>
         <string>bootstrap</string>
         <string>run</string>
     </array>
+    <key>EnvironmentVariables</key>
+    <dict>{env_items}
+    </dict>
     <key>RunAtLoad</key><true/>
     <key>KeepAlive</key>
     <dict><key>SuccessfulExit</key><false/></dict>
     <key>ThrottleInterval</key><integer>300</integer>
-    <key>StandardOutPath</key><string>{log_path}</string>
-    <key>StandardErrorPath</key><string>{log_path}</string>
+    <key>StandardOutPath</key><string>{escape(str(log_path))}</string>
+    <key>StandardErrorPath</key><string>{escape(str(log_path))}</string>
 </dict>
 </plist>
 """
 
 
-def render_systemd_unit(tg_bin: str) -> str:
+def _systemd_quote(value: str) -> str:
+    """Quote a value for systemd unit files: %-specifiers doubled,
+    backslashes and quotes escaped, whole token double-quoted."""
+    value = value.replace("%", "%%").replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{value}"'
+
+
+def render_systemd_unit(tg_bin: str, env: dict[str, str] | None = None) -> str:
+    env_lines = "".join(
+        f"Environment={_systemd_quote(f'{k}={v}')}\n" for k, v in (env or {}).items()
+    )
     return f"""[Unit]
 Description=tg-cli initial sync (self-removing after one full pass)
 
 [Service]
 Type=simple
-ExecStart={tg_bin} bootstrap run
+{env_lines}ExecStart={_systemd_quote(tg_bin)} bootstrap run
 Restart=on-failure
 RestartSec=300
 
@@ -110,23 +146,42 @@ WantedBy=default.target
 def install_autostart() -> str:
     """Install and kick the platform autostart entry. Returns a description."""
     tg_bin = tg_executable()
+    env = runtime_env()
     if sys.platform == "darwin":
+        import plistlib
+
+        rendered = render_plist(tg_bin, get_data_dir() / "bootstrap.log", env)
+        # Parse before install: a malformed template must fail loudly and
+        # leave no partial artifacts behind (#34).
+        plistlib.loads(rendered.encode())
         path = launch_agent_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(render_plist(tg_bin, get_data_dir() / "bootstrap.log"))
-        subprocess.run(["launchctl", "unload", str(path)], capture_output=True)
-        subprocess.run(["launchctl", "load", "-w", str(path)], capture_output=True, check=True)
+        path.write_text(rendered)
+        try:
+            subprocess.run(["launchctl", "unload", str(path)], capture_output=True)
+            subprocess.run(
+                ["launchctl", "load", "-w", str(path)], capture_output=True, check=True
+            )
+        except BaseException:
+            path.unlink(missing_ok=True)
+            raise
         return f"LaunchAgent {path}"
     if sys.platform.startswith("linux"):
+        rendered = render_systemd_unit(tg_bin, env)
         path = systemd_unit_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(render_systemd_unit(tg_bin))
-        subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
-        subprocess.run(
-            ["systemctl", "--user", "enable", "--now", _UNIT_NAME],
-            capture_output=True,
-            check=True,
-        )
+        path.write_text(rendered)
+        try:
+            subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
+            subprocess.run(
+                ["systemctl", "--user", "enable", "--now", _UNIT_NAME],
+                capture_output=True,
+                check=True,
+            )
+        except BaseException:
+            path.unlink(missing_ok=True)
+            subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
+            raise
         return f"systemd user unit {path}"
     raise RuntimeError(
         "Autostart is implemented for macOS (launchd) and Linux (systemd --user). "

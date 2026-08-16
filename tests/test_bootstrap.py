@@ -49,10 +49,50 @@ class TestTemplates:
 
     def test_systemd_unit_content(self):
         text = bs.render_systemd_unit("/home/u/.local/bin/tg")
-        assert "ExecStart=/home/u/.local/bin/tg bootstrap run" in text
+        assert 'ExecStart="/home/u/.local/bin/tg" bootstrap run' in text
         assert "Restart=on-failure" in text
         assert "RestartSec=300" in text
         assert "WantedBy=default.target" in text
+
+    def test_plist_parses_with_hostile_paths(self):
+        """Parser-based check: spaces, &, %, quotes and Unicode (#34)."""
+        import plistlib
+
+        hostile = '/tmp/A&B <x> "квоты" 100%/tg'
+        env = {"DATA_DIR": '/tmp/данные & "прочее" 50%'}
+        data = plistlib.loads(
+            bs.render_plist(hostile, Path("/tmp/л&g.log"), env).encode()
+        )
+        assert data["ProgramArguments"][0] == hostile
+        assert data["EnvironmentVariables"]["DATA_DIR"] == env["DATA_DIR"]
+
+    def test_systemd_unit_quotes_hostile_values(self):
+        hostile = '/opt/tg with space/&весёлый%/tg'
+        env = {"DATA_DIR": '/data dir/"q"/100%'}
+        text = bs.render_systemd_unit(hostile, env)
+        # systemd unquoting: strip quotes, %% -> %, \" -> "
+        exec_line = next(line for line in text.splitlines() if line.startswith("ExecStart="))
+        quoted = exec_line[len("ExecStart="):].rsplit(" bootstrap run", 1)[0]
+        assert quoted.startswith('"') and quoted.endswith('"')
+        unquoted = quoted[1:-1].replace("%%", "%").replace('\\"', '"')
+        assert unquoted == hostile
+        env_line = next(line for line in text.splitlines() if line.startswith("Environment="))
+        env_val = env_line[len("Environment="):]
+        assert env_val.startswith('"') and env_val.endswith('"')
+        restored = env_val[1:-1].replace("%%", "%").replace('\\"', '"')
+        assert restored == f"DATA_DIR={env['DATA_DIR']}"
+
+    def test_runtime_env_carries_state_locators(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("DATA_DIR", str(tmp_path / "custom"))
+        monkeypatch.setenv("DB_PATH", str(tmp_path / "m.db"))
+        monkeypatch.setenv("TG_SESSION_NAME", "alt")
+        env = bs.runtime_env()
+        assert env["DATA_DIR"] == str(tmp_path / "custom")
+        assert env["DB_PATH"] == str(tmp_path / "m.db")
+        assert env["TG_SESSION_NAME"] == "alt"
+        # no secrets ever
+        assert "TG_API_ID" not in env
+        assert "TG_API_HASH" not in env
 
 
 # ─────────────────────── worker semantics ───────────────────────

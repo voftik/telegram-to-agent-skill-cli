@@ -74,3 +74,7 @@ cd telegram-to-agent-skill-cli && git pull
 Каталог данных выбирается платформенно (XDG на Linux, LOCALAPPDATA на
 Windows); путь скиллов Claude Code тот же (`~/.claude/skills`). install.sh
 рассчитан на macOS/Linux; на Windows выполните шаги вручную.
+
+## Способ доставки скилла
+
+Поддерживаемый способ установки скилла — клон репозитория (или распакованный sdist) + `./install.sh`. Wheel содержит только runtime-код CLI и скилл не включает; sdist — полный срез исходников, состав проверяется в CI (`scripts/check_dist.py`).

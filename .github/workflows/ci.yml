@@ -63,3 +63,6 @@ jobs:
 
       - name: Check distribution metadata
         run: uv run twine check dist/*
+
+      - name: Check packaging contract (skill, docs, no stale refs)
+        run: uv run python scripts/check_dist.py

@@ -53,13 +53,20 @@ tg = "tg_cli.cli.main:cli"
 packages = ["src/tg_cli"]
 
 [tool.hatch.build.targets.sdist]
+# Contract (#33): the sdist is a full source snapshot that reproduces the
+# agent integration (canonical skill + installer + docs); the wheel ships
+# runtime code only. scripts/check_dist.py enforces this in CI.
 include = [
     "src/tg_cli",
     "README.md",
+    "README.ru.md",
     "LICENSE",
     "CHANGELOG.md",
     "CONTRIBUTING.md",
-    "SKILL.md",
+    "SCHEMA.md",
+    "skill",
+    "docs",
+    "install.sh",
     ".env.example",
     "examples",
     "tests",
