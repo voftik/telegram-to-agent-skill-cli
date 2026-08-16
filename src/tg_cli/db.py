@@ -293,6 +293,32 @@ class MessageDB:
             log.warning("insert_batch failed: %s", e)
             return 0
 
+    def insert_attachments(self, rows: list[dict]) -> int:
+        """Batch insert attachment metadata. Duplicates are ignored."""
+        if not rows:
+            return 0
+        cursor = self.conn.executemany(
+            """INSERT OR IGNORE INTO attachments
+               (chat_id, msg_id, kind, file_name, mime_type, size_bytes)
+               VALUES (:chat_id, :msg_id, :kind, :file_name, :mime_type, :size_bytes)""",
+            rows,
+        )
+        self.conn.commit()
+        return max(cursor.rowcount, 0)
+
+    def insert_links(self, rows: list[dict]) -> int:
+        """Batch insert shared links. Duplicates are ignored."""
+        if not rows:
+            return 0
+        cursor = self.conn.executemany(
+            """INSERT OR IGNORE INTO links
+               (chat_id, msg_id, url, fetch_url, kind)
+               VALUES (:chat_id, :msg_id, :url, :fetch_url, :kind)""",
+            rows,
+        )
+        self.conn.commit()
+        return max(cursor.rowcount, 0)
+
     def search(
         self,
         keyword: str,

@@ -21,6 +21,7 @@ from .config import (
 )
 from .console import console
 from .db import MessageDB
+from .extract import extract_message_meta
 
 log = logging.getLogger(__name__)
 
@@ -185,8 +186,14 @@ async def fetch_history(
         inserted_count = 0
         BATCH_SIZE = 200
 
+        att_batch: list[dict] = []
+        link_batch: list[dict] = []
+
         async for msg in client.iter_messages(entity, limit=limit, min_id=min_id):
-            if msg.text is None and msg.message is None:
+            meta = extract_message_meta(msg)
+            # Media-only messages (a file without caption) must be kept;
+            # service messages (no text, no media) are skipped.
+            if msg.text is None and msg.message is None and not meta["has_media"]:
                 continue
 
             # Extract sender name from Telethon's cached _sender (zero API calls)
@@ -216,12 +223,22 @@ async def fetch_history(
                     sender_name=sender_name,
                     content=content,
                     timestamp=ts or datetime.now(timezone.utc),
+                    reply_to_msg_id=meta["reply_to_msg_id"],
+                    has_media=meta["has_media"],
                 )
             )
+            if meta["attachment"]:
+                att_batch.append(dict(chat_id=chat_id, msg_id=msg.id, **meta["attachment"]))
+            for link in meta["links"]:
+                link_batch.append(dict(chat_id=chat_id, msg_id=msg.id, **link))
 
             if len(batch) >= BATCH_SIZE:
                 inserted_count += db.insert_batch(batch)
+                db.insert_attachments(att_batch)
+                db.insert_links(link_batch)
                 batch.clear()
+                att_batch.clear()
+                link_batch.clear()
                 if on_progress:
                     on_progress(inserted_count)
                 # Anti-ban: throttle between pagination batches
@@ -232,6 +249,8 @@ async def fetch_history(
         # Flush remaining
         if batch:
             inserted_count += db.insert_batch(batch)
+        db.insert_attachments(att_batch)
+        db.insert_links(link_batch)
 
         return inserted_count
     except FloodWaitError as e:
@@ -348,6 +367,7 @@ async def listen(
             if ts and ts.tzinfo is None:
                 ts = ts.replace(tzinfo=timezone.utc)
 
+            meta = extract_message_meta(msg)
             db.insert_message(
                 chat_id=chat.id,
                 chat_name=chat_name,
@@ -356,7 +376,15 @@ async def listen(
                 sender_name=sender_name,
                 content=content,
                 timestamp=ts or datetime.now(timezone.utc),
+                reply_to_msg_id=meta["reply_to_msg_id"],
+                has_media=meta["has_media"],
             )
+            if meta["attachment"]:
+                db.insert_attachments([dict(chat_id=chat.id, msg_id=msg.id, **meta["attachment"])])
+            if meta["links"]:
+                db.insert_links(
+                    [dict(chat_id=chat.id, msg_id=msg.id, **link) for link in meta["links"]]
+                )
 
             time_str = ts.strftime("%H:%M:%S") if ts else "??:??:??"
             console.print(
