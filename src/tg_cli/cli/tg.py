@@ -35,6 +35,31 @@ def _telegram_user_payload(me) -> dict[str, str | int]:
     }
 
 
+def _run_async(coro):
+    """asyncio.run with human-friendly failure for busy/broken sessions.
+
+    A locked Telethon session (another sync holds it) or a network error
+    must produce a clear one-liner and exit code 1, not a traceback.
+    """
+    from ._output import emit_error
+
+    try:
+        return asyncio.run(coro)
+    except SystemExit:
+        raise
+    except Exception as e:
+        message = str(e) or type(e).__name__
+        if "database is locked" in message:
+            message = (
+                "Telegram session is busy (another sync/download holds it). "
+                "Retry after it finishes."
+            )
+        if emit_error("telegram_error", message):
+            raise SystemExit(1) from None
+        console.print(f"[red]✗ {message}[/red]")
+        raise SystemExit(1) from None
+
+
 @click.group("tg")
 def tg_group():
     """Telegram operations — connect, fetch, sync, listen."""
@@ -51,7 +76,7 @@ def tg_chats(chat_type: str | None, as_json: bool, as_yaml: bool):
         async with connect() as client:
             return await list_chats(client, chat_type)
 
-    chats = asyncio.run(_run())
+    chats = _run_async(_run())
     if emit_structured(chats, as_json=as_json, as_yaml=as_yaml):
         return
 
@@ -93,7 +118,7 @@ def tg_history(chat: str, limit: int, as_json: bool, as_yaml: bool):
                     )
                 return result
 
-    res = asyncio.run(_run())
+    res = _run_async(_run())
     payload = {"stored": res["stored"], "status": res["status"], "chat": chat}
     if res["error"]:
         payload["error"] = res["error"]
@@ -140,7 +165,7 @@ def tg_sync(chat: str, limit: int, as_json: bool, as_yaml: bool):
 
             return await sync_chat_dialog(chat, limit=limit, on_progress=on_progress)
 
-    res = asyncio.run(_run())
+    res = _run_async(_run())
     if res is None:
         return
     payload = {"synced": res["stored"], "status": res["status"], "chat": chat}
@@ -191,7 +216,7 @@ def tg_sync_all(limit: int, delay: float, max_chats: int | None, as_json: bool, 
             limit=limit, on_chat_done=on_chat_done, delay=delay, max_chats=max_chats
         )
 
-    report = asyncio.run(_run())
+    report = _run_async(_run())
     _finish_sync_report(report, as_json=as_json, as_yaml=as_yaml)
 
 
@@ -255,7 +280,7 @@ def tg_refresh(limit: int, delay: float, max_chats: int | None, as_json: bool, a
             limit=limit, on_chat_done=on_chat_done, delay=delay, max_chats=max_chats
         )
 
-    report = asyncio.run(_run())
+    report = _run_async(_run())
     _finish_sync_report(report, as_json=as_json, as_yaml=as_yaml)
 
 
@@ -272,7 +297,7 @@ def tg_backfill(chat: str, limit: int, as_json: bool, as_yaml: bool):
     """
     from ._sync import backfill_chat_dialog
 
-    res = asyncio.run(backfill_chat_dialog(chat, limit=limit))
+    res = _run_async(backfill_chat_dialog(chat, limit=limit))
     if emit_structured(res, as_json=as_json, as_yaml=as_yaml):
         if res["error"]:
             raise SystemExit(1)
@@ -348,7 +373,7 @@ def tg_info(chat: str, as_json: bool, as_yaml: bool):
         async with connect() as client:
             return await get_chat_info(client, _parse_chat(chat))
 
-    info = asyncio.run(_run())
+    info = _run_async(_run())
     if not info:
         console.print(f"[red]Could not find chat: {chat}[/red]")
         return
@@ -423,7 +448,7 @@ def tg_status(as_json: bool, as_yaml: bool):
 
     fmt = default_structured_format(as_json=as_json, as_yaml=as_yaml)
     try:
-        info = asyncio.run(_run())
+        info = _run_async(_run())
     except Exception as exc:
         if fmt is not None:
             click.echo(dump_structured(error_payload("auth_error", str(exc)), fmt=fmt))
@@ -500,7 +525,7 @@ def tg_send(
             )
             return msg
 
-    msg = asyncio.run(_run())
+    msg = _run_async(_run())
     _log_sent(chat, msg.id, message)
     payload = {"sent": True, "msg_id": msg.id, "chat": chat}
     if reply is not None:
@@ -695,7 +720,7 @@ def tg_files(
                         limit=limit,
                     )
 
-            downloaded = asyncio.run(_run())
+            downloaded = _run_async(_run())
             if emit_structured(downloaded, as_json=as_json, as_yaml=as_yaml):
                 return
             if not downloaded:

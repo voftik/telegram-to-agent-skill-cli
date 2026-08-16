@@ -127,3 +127,39 @@ class TestRun:
         result = runner.invoke(cli, ["bootstrap", "run"])
         assert result.exit_code == 1
         assert bs.read_marker() is not None  # still pending — will retry
+
+    def test_run_incomplete_pass_keeps_marker(self, runner, monkeypatch, tmp_path):
+        """A pass with failed chats or unhealed gaps must NOT disarm (#19)."""
+        from contextlib import asynccontextmanager
+
+        monkeypatch.setenv("DATA_DIR", str(tmp_path))
+        monkeypatch.setenv("DB_PATH", str(tmp_path / "m.db"))
+        bs.write_marker(delay=0, limit=10)
+
+        @asynccontextmanager
+        async def fake_connect():
+            yield object()
+
+        async def failing_sync_all(client, db, limit_per_chat, delay):
+            return {
+                "enumerated": True,
+                "error": None,
+                "total": 3,
+                "ok": 2,
+                "partial": 0,
+                "failed": 1,
+                "new_messages": 7,
+                "results": {},
+            }
+
+        import tg_cli.client as client_mod
+
+        monkeypatch.setattr(client_mod, "connect", fake_connect)
+        monkeypatch.setattr(client_mod, "sync_all", failing_sync_all)
+        removed = []
+        monkeypatch.setattr(bs, "uninstall_autostart", lambda: removed.append(True))
+
+        result = runner.invoke(cli, ["bootstrap", "run"])
+        assert result.exit_code == 1
+        assert bs.read_marker() is not None
+        assert removed == []
