@@ -136,18 +136,23 @@ def _migrate(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def _canonical_chat_id(chat_id: int) -> int:
-    """Normalize Telegram chat IDs to the bare numeric ID stored in SQLite.
+_CHANNEL_MARK = 1_000_000_000_000
 
-    Only strips the -100 prefix from negative IDs (Telegram's convention for
-    channels/supergroups).  Positive IDs starting with 100 are left as-is.
+
+def _chat_id_candidates(chat_id: int) -> list[int]:
+    """All marked-ID forms a user-supplied number may refer to (#21).
+
+    The database stores Telethon marked IDs (user 123 / basic group -123 /
+    channel -(10^12+123)). A bare positive input is ambiguous, so lookups
+    try every marked form; a negative (marked) input also tries its bare
+    form so legacy rows keep resolving until their lazy migration runs.
     """
     if chat_id < 0:
-        digits = str(abs(chat_id))
-        if digits.startswith("100") and len(digits) > 3:
-            return int(digits[3:])
-        return abs(chat_id)
-    return chat_id
+        bare = -chat_id
+        if bare > _CHANNEL_MARK:
+            bare -= _CHANNEL_MARK
+        return [chat_id, bare]
+    return [chat_id, -chat_id, -(_CHANNEL_MARK + chat_id)]
 
 
 class MessageDB:
@@ -177,8 +182,8 @@ class MessageDB:
         chats = self.get_chats()
 
         try:
-            numeric_id = _canonical_chat_id(int(chat_str))
-            exact_id_matches = [c for c in chats if c["chat_id"] == numeric_id]
+            candidates = _chat_id_candidates(int(chat_str))
+            exact_id_matches = [c for c in chats if c["chat_id"] in candidates]
             if exact_id_matches:
                 return exact_id_matches
         except ValueError:
@@ -779,6 +784,42 @@ class MessageDB:
             (root_id, chat_id, chat_id),
         ).fetchall()
         return [dict(r) for r in rows]
+
+    # ─────────────────── marked-ID migration (#21) ───────────────────
+
+    def has_chat(self, chat_id: int) -> bool:
+        return (
+            self.conn.execute(
+                "SELECT 1 FROM messages WHERE chat_id = ? LIMIT 1", (chat_id,)
+            ).fetchone()
+            is not None
+        )
+
+    def remap_chat_id(self, old_id: int, new_id: int) -> int:
+        """Move all rows of a chat to a new key (legacy bare → marked ID).
+
+        Rows whose (chat_id, msg_id) already exist under the new key are
+        dropped as duplicates — nothing is merged across different peers,
+        because the caller derives new_id from the resolved entity itself.
+        Returns the number of migrated message rows.
+        """
+        moved = 0
+        with self.conn:  # single transaction
+            cur = self.conn.execute(
+                "UPDATE OR IGNORE messages SET chat_id = ? WHERE chat_id = ?",
+                (new_id, old_id),
+            )
+            moved = max(cur.rowcount, 0)
+            for table in ("attachments", "links", "sync_gaps"):
+                self.conn.execute(
+                    f"UPDATE OR IGNORE {table} SET chat_id = ? WHERE chat_id = ?",
+                    (new_id, old_id),
+                )
+                self.conn.execute(f"DELETE FROM {table} WHERE chat_id = ?", (old_id,))
+            # Leftover message rows are duplicates already present under new_id;
+            # the FTS delete-trigger cleans their index entries.
+            self.conn.execute("DELETE FROM messages WHERE chat_id = ?", (old_id,))
+        return moved
 
     # ─────────────────── sync gap cursors (#22) ───────────────────
 

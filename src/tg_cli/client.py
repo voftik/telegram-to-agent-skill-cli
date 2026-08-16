@@ -36,6 +36,31 @@ _SYSTEM_LANG_CODE = "en-US"
 _FIRST_SYNC_LIMIT = 500
 
 
+def marked_peer_id(entity) -> int:
+    """Collision-free chat key: Telethon's marked ID (#21).
+
+    User/basic group/channel bare IDs share one numeric space; the marked
+    form (user 123 / group -123 / channel -100123…) is unambiguous. Falls
+    back to .id for non-TL objects (test fakes).
+    """
+    try:
+        from telethon import utils
+
+        return utils.get_peer_id(entity)
+    except Exception:
+        return getattr(entity, "id", 0)
+
+
+def _remap_legacy_chat_id(db: MessageDB, entity, marked: int) -> None:
+    """Move rows stored under the legacy bare ID to the marked ID, once."""
+    bare = getattr(entity, "id", None)
+    if not bare or bare == marked:
+        return
+    if db.has_chat(bare):
+        moved = db.remap_chat_id(bare, marked)
+        log.info("migrated chat %s -> %s (%d rows)", bare, marked, moved)
+
+
 def _get_sender_name(sender: User | Channel | Chat | None) -> str | None:
     if sender is None:
         return None
@@ -333,7 +358,8 @@ async def fetch_history(
         chat_name = (
             getattr(entity, "title", None) or getattr(entity, "first_name", None) or str(chat)
         )
-        chat_id = entity.id
+        chat_id = marked_peer_id(entity)
+        _remap_legacy_chat_id(db, entity, chat_id)
 
         ingest = _Ingest(db, chat_id, chat_name)
         error = await _ingest_range(
@@ -382,7 +408,8 @@ async def fill_gaps(
         entity = await client.get_entity(chat)
     except Exception as e:
         return {"stored": 0, "closed": 0, "remaining": -1, "error": str(e)}
-    chat_id = entity.id
+    chat_id = marked_peer_id(entity)
+    _remap_legacy_chat_id(db, entity, chat_id)
     chat_name = getattr(entity, "title", None) or getattr(entity, "first_name", None) or str(chat)
 
     stored = 0
@@ -470,7 +497,8 @@ async def download_attachments(
     from .textextract import extract_text, extractable
 
     entity = await client.get_entity(chat)
-    chat_id = entity.id
+    chat_id = marked_peer_id(entity)
+    _remap_legacy_chat_id(db, entity, chat_id)
 
     rows = db.get_attachments(chat_id=chat_id, hours=hours, limit=max(limit * 5, limit))
     targets = []
@@ -595,7 +623,7 @@ async def sync_all(
     try:
         async for dialog in client.iter_dialogs():
             entity = dialog.entity
-            dialog_cache[entity.id] = (entity, dialog.name)
+            dialog_cache[marked_peer_id(entity)] = (entity, dialog.name)
     except Exception as e:
         # A failed enumeration must never look like an empty-but-successful
         # pass (#19) — report it explicitly.
@@ -698,8 +726,9 @@ async def listen(
                 ts = ts.replace(tzinfo=timezone.utc)
 
             meta = extract_message_meta(msg)
+            marked = getattr(event, "chat_id", None) or marked_peer_id(chat)
             db.insert_message(
-                chat_id=chat.id,
+                chat_id=marked,
                 chat_name=chat_name,
                 msg_id=msg.id,
                 sender_id=msg.sender_id,
@@ -710,10 +739,10 @@ async def listen(
                 has_media=meta["has_media"],
             )
             if meta["attachment"]:
-                db.insert_attachments([dict(chat_id=chat.id, msg_id=msg.id, **meta["attachment"])])
+                db.insert_attachments([dict(chat_id=marked, msg_id=msg.id, **meta["attachment"])])
             if meta["links"]:
                 db.insert_links(
-                    [dict(chat_id=chat.id, msg_id=msg.id, **link) for link in meta["links"]]
+                    [dict(chat_id=marked, msg_id=msg.id, **link) for link in meta["links"]]
                 )
 
             time_str = ts.strftime("%H:%M:%S") if ts else "??:??:??"

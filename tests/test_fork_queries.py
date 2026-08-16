@@ -159,3 +159,74 @@ class TestStyleCorpus:
         )
         corpus = db.get_style_corpus(sender_id=7)
         assert [c["content"] for c in corpus] == ["длинное содержательное сообщение"]
+
+
+# ─────────────────────── marked peer IDs (#21) ───────────────────────
+
+
+class TestMarkedIds:
+    def test_marked_id_for_tl_peers(self):
+        from telethon.tl.types import PeerChannel, PeerChat, PeerUser
+
+        from tg_cli.client import marked_peer_id
+
+        assert marked_peer_id(PeerUser(123)) == 123
+        assert marked_peer_id(PeerChat(1005)) == -1005
+        assert marked_peer_id(PeerChannel(123)) == -1000000000123
+
+    def test_user_and_channel_with_same_bare_id_stay_separate(self, db):
+        db.insert_message(**make_msg(chat_id=123, chat_name="Пользователь", msg_id=1))
+        db.insert_message(
+            **make_msg(chat_id=-1000000000123, chat_name="Канал", msg_id=1)
+        )
+        chats = db.get_chats()
+        assert len(chats) == 2
+
+    def test_numeric_lookup_matches_any_marked_form(self, db):
+        db.insert_message(
+            **make_msg(chat_id=-1001307778786, chat_name="Эксплойт", msg_id=1)
+        )
+        assert db.resolve_chat_id("1307778786") == -1001307778786
+        assert db.resolve_chat_id("-1001307778786") == -1001307778786
+
+    def test_basic_group_negative_id_resolves(self, db):
+        db.insert_message(**make_msg(chat_id=-1005, chat_name="Группа", msg_id=1))
+        assert db.resolve_chat_id("-1005") == -1005
+        assert db.resolve_chat_id("1005") == -1005
+
+    def test_remap_moves_all_tables(self, db):
+        db.insert_message(**make_msg(chat_id=555, chat_name="Legacy", msg_id=1))
+        db.insert_message(**make_msg(chat_id=555, chat_name="Legacy", msg_id=2))
+        db.insert_attachments(
+            [dict(chat_id=555, msg_id=2, kind="document",
+                  file_name="a.pdf", mime_type=None, size_bytes=1)]
+        )
+        db.insert_links(
+            [dict(chat_id=555, msg_id=1, url="https://a.io", fetch_url="https://a.io",
+                  kind="web")]
+        )
+        db.record_gap(555, 0, 100, kind="backfill")
+
+        moved = db.remap_chat_id(555, -1000000000555)
+        assert moved == 2
+        assert db.has_chat(555) is False
+        assert db.count(chat_id=-1000000000555) == 2
+        assert len(db.get_attachments(chat_id=-1000000000555)) == 1
+        assert len(db.get_links(chat_id=-1000000000555)) == 1
+        assert len(db.get_gaps(chat_id=-1000000000555, kind="backfill")) == 1
+        # FTS follows the moved rows
+        hits = db.conn.execute(
+            "SELECT rowid FROM messages_fts WHERE messages_fts MATCH 'Hello'"
+        ).fetchall()
+        assert len(hits) == 2
+
+    def test_remap_drops_duplicates_without_losing_new_rows(self, db):
+        db.insert_message(**make_msg(chat_id=555, msg_id=1, content="старая копия"))
+        db.insert_message(**make_msg(chat_id=-1000000000555, msg_id=1, content="новая"))
+        db.insert_message(**make_msg(chat_id=-1000000000555, msg_id=2, content="ещё"))
+        db.remap_chat_id(555, -1000000000555)
+        rows = db.conn.execute(
+            "SELECT msg_id, content FROM messages WHERE chat_id = -1000000000555"
+            " ORDER BY msg_id"
+        ).fetchall()
+        assert [(r["msg_id"], r["content"]) for r in rows] == [(1, "новая"), (2, "ещё")]

@@ -236,7 +236,8 @@ def thread_cmd(
                 raise SystemExit(1) from None
             console.print("[red]Only t.me/c/<chat>/<msg> links are supported.[/red]")
             return
-        resolved_chat_id, msg_id = int(m.group(1)), int(m.group(2))
+        # t.me/c/ links carry the bare channel id; the DB keys on marked IDs.
+        resolved_chat_id, msg_id = -(1_000_000_000_000 + int(m.group(1))), int(m.group(2))
     else:
         if not chat or msg_id is None:
             if emit_error("missing_args", "Provide CHAT and --msg-id, or --url."):
