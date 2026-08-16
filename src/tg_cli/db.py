@@ -119,7 +119,18 @@ def _migrate(conn: sqlite3.Connection) -> None:
         _ensure_fts_complete(conn)
         return
 
-    conn.execute("BEGIN IMMEDIATE")
+    # BEGIN IMMEDIATE can return SQLITE_BUSY immediately (deadlock
+    # detection bypasses busy_timeout) — retry with a small backoff.
+    import time as _time
+
+    for attempt in range(60):
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            break
+        except sqlite3.OperationalError as e:
+            if "locked" not in str(e) or attempt == 59:
+                raise
+            _time.sleep(0.05 * (attempt % 10 + 1))
     try:
         # Re-check under the write lock — another process may have migrated
         # while we were waiting.
