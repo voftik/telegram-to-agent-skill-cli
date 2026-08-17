@@ -1,6 +1,9 @@
 {
   "name": "telegram-to-agent-skill-cli",
-  "owner": { "name": "voftik", "url": "https://github.com/voftik" },
+  "owner": {
+    "name": "voftik",
+    "url": "https://github.com/voftik"
+  },
   "plugins": [
     {
       "name": "telegram-context",
@@ -8,5 +11,6 @@
       "description": "Your Telegram chats as agent context: search, summaries, threads, files, links. Requires the tg CLI: uv tool install telegram-to-agent-skill-cli && tg setup",
       "version": "0.7.0"
     }
-  ]
+  ],
+  "description": "Telegram chats as agent context for Claude Code: search, summaries, threads, files and links from your own account via the tg CLI."
 }
