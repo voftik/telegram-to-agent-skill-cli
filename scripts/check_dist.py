@@ -15,11 +15,15 @@ import sys
 import tarfile
 from pathlib import Path
 
+_SKILL_FILES = [
+    "SKILL.md",
+    "references/analyze-chat.md",
+    "references/digest.md",
+    "references/reply-as-me.md",
+]
+
 REQUIRED_SDIST = [
-    "skill/SKILL.md",
-    "skill/references/analyze-chat.md",
-    "skill/references/digest.md",
-    "skill/references/reply-as-me.md",
+    *[f"src/tg_cli/skill/{f}" for f in _SKILL_FILES],
     "docs/INSTALL.md",
     "install.sh",
     "README.md",
@@ -27,6 +31,10 @@ REQUIRED_SDIST = [
     "SCHEMA.md",
     "src/tg_cli/cli/main.py",
 ]
+
+# The wheel is the canonical delivered artifact: it MUST carry the skill
+# so `tg skill install` works for plain PyPI installs (no clone).
+REQUIRED_WHEEL = [f"tg_cli/skill/{f}" for f in _SKILL_FILES]
 
 FORBIDDEN_PATTERNS = {
     "kabi-tg-cli": "stale upstream package reference",
@@ -53,24 +61,47 @@ def main() -> None:
             if required not in members:
                 fail(f"sdist misses {required}")
 
-        for name in members:
-            if not (name.startswith("skill/") and name.endswith(".md")):
-                continue
-            data = tf.extractfile(f"{root}/{name}").read().decode("utf-8")
-            for pattern, why in FORBIDDEN_PATTERNS.items():
-                if pattern in data:
-                    fail(f"{name}: {why} ({pattern!r})")
-
-        skill_md = tf.extractfile(f"{root}/skill/SKILL.md").read().decode("utf-8")
-        for link in re.findall(r"\]\(([^)#]+)\)", skill_md):
-            if link.startswith(("http://", "https://")):
-                continue
-            if f"skill/{link}" not in members:
-                fail(f"skill/SKILL.md links to missing file: {link}")
+        sdist_skill = {
+            name.removeprefix("src/tg_cli/skill/"): tf.extractfile(f"{root}/{name}").read()
+            for name in members
+            if name.startswith("src/tg_cli/skill/") and not name.endswith("/")
+        }
 
     wheels = sorted(dist.glob("*.whl"))
     if not wheels:
         fail("no wheel in dist/")
+    import zipfile
+
+    with zipfile.ZipFile(wheels[-1]) as zf:
+        wheel_names = set(zf.namelist())
+        for required in REQUIRED_WHEEL:
+            if required not in wheel_names:
+                fail(f"wheel misses {required}")
+
+        wheel_skill = {
+            name.removeprefix("tg_cli/skill/"): zf.read(name)
+            for name in wheel_names
+            if name.startswith("tg_cli/skill/")
+        }
+        for name, data in wheel_skill.items():
+            if not name.endswith(".md"):
+                continue
+            text = data.decode("utf-8")
+            for pattern, why in FORBIDDEN_PATTERNS.items():
+                if pattern in text:
+                    fail(f"wheel skill {name}: {why} ({pattern!r})")
+
+        skill_md = wheel_skill["SKILL.md"].decode("utf-8")
+        for link in re.findall(r"\]\(([^)#]+)\)", skill_md):
+            if link.startswith(("http://", "https://")):
+                continue
+            if link not in wheel_skill:
+                fail(f"SKILL.md links to file missing from the wheel: {link}")
+
+        # sdist and wheel must ship byte-identical skills
+        for name, data in wheel_skill.items():
+            if sdist_skill.get(name) != data:
+                fail(f"skill file differs between sdist and wheel: {name}")
 
     print(f"OK: {sdists[-1].name} and {wheels[-1].name} honour the contract")
 

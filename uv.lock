@@ -735,6 +735,7 @@ source = { editable = "." }
 dependencies = [
     { name = "click" },
     { name = "openpyxl" },
+    { name = "packaging" },
     { name = "pyasn1" },
     { name = "pygments" },
     { name = "pypdf" },
@@ -756,6 +757,7 @@ dev = [
 requires-dist = [
     { name = "click", specifier = ">=8.3.3" },
     { name = "openpyxl", specifier = ">=3.1" },
+    { name = "packaging", specifier = ">=23" },
     { name = "pyasn1", specifier = ">=0.6.4" },
     { name = "pygments", specifier = ">=2.20.0" },
     { name = "pypdf", specifier = ">=4.0" },

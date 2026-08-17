@@ -34,6 +34,8 @@ dependencies = [
     "pyyaml>=6.0",
     "pypdf>=4.0",
     "openpyxl>=3.1",
+    # PEP 440 version comparison for `tg update` — never hand-rolled:
+    "packaging>=23",
     # Security floors for transitive dependencies (audit #36):
     "pyasn1>=0.6.4",    # PYSEC-2026-2263 (via telethon→rsa)
     "pygments>=2.20.0",  # PYSEC-2026-2987 (via rich)
@@ -88,3 +90,8 @@ dev = [
     "ruff>=0.11.0",
     "twine>=6.1.0",
 ]
+
+[tool.ruff.lint.per-file-ignores]
+# Frozen marker-guarded snippets must stay byte-identical to what is
+# already appended on user machines — they cannot be wrapped.
+"src/tg_cli/skillpkg.py" = ["E501"]
