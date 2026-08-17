@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## 0.7.0-dev (fork: telegram-to-agent-skill-cli)
+## 0.7.0 (2026-08-17) — fork: telegram-to-agent-skill-cli
 
 Fork of jackwener/tg-cli focused on agent integration. Highlights:
 
@@ -17,7 +17,15 @@ Fork of jackwener/tg-cli focused on agent integration. Highlights:
 - Reboot-resilient initial sync (`tg bootstrap`, launchd/systemd)
 - Safety: send/edit/delete are dry-run by default with `--confirm` and a
   durable mutation journal; private file permissions; hardened installer
-- Agent skill (`skill/`) with auto-activation for Claude Code and Codex
+- Agent skill (shipped inside the wheel) with auto-activation for Claude
+  Code and Codex; Claude Code plugin marketplace in-repo
+- `tg setup` interactive wizard, `tg update` self-update with PyPI check,
+  `tg skill install/status/uninstall`
+- Release pipeline: PyPI (Trusted Publishing), npm launcher, GitHub
+  Releases on version tags
+- Hardened storage (atomic batches, crash-safe migration, private file
+  modes), resource budgets for untrusted attachments, uniform CLI error
+  contract, safe rendering of hostile chat text, local-timezone buckets
 
 ## 0.4.3 - 2026-03-11
 
