@@ -832,10 +832,12 @@ class MessageDB:
         granularity: str = "day",
     ) -> list[dict]:
         """Get message count grouped by time period."""
+        # Bucket by the user's local timezone, per-timestamp (DST-correct):
+        # SQLite's 'localtime' modifier honours TZ for each conversion (#37).
         if granularity == "hour":
-            time_expr = "substr(timestamp, 1, 13)"  # YYYY-MM-DDTHH
+            time_expr = "strftime('%Y-%m-%dT%H', timestamp, 'localtime')"
         else:
-            time_expr = "substr(timestamp, 1, 10)"  # YYYY-MM-DD
+            time_expr = "strftime('%Y-%m-%d', timestamp, 'localtime')"
 
         conditions = ["1=1"]
         params: list[Any] = []
@@ -875,7 +877,7 @@ class MessageDB:
             ).fetchone()[0]
 
         top_days = self.conn.execute(
-            "SELECT substr(timestamp, 1, 10) AS day, COUNT(*) AS msg_count"
+            "SELECT strftime('%Y-%m-%d', timestamp, 'localtime') AS day, COUNT(*) AS msg_count"
             " FROM messages WHERE chat_id = ? GROUP BY day ORDER BY msg_count DESC LIMIT 3",
             (chat_id,),
         ).fetchall()

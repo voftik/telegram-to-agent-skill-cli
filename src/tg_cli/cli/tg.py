@@ -4,6 +4,7 @@ import asyncio
 import time
 
 import click
+from rich.markup import escape
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 
@@ -95,7 +96,7 @@ def _mutation_guard(
             return None
         console.print(f"[yellow]DRY-RUN — no {op} performed.[/yellow]")
         for key, value in preview.items():
-            console.print(f"  {key}: {value}")
+            console.print(f"  {key}: {escape(str(value))}")
         console.print("[dim]Re-run with --confirm to actually do it.[/dim]")
         return None
 
@@ -125,7 +126,12 @@ def tg_group():
 
 
 @tg_group.command("chats")
-@click.option("--type", "chat_type", help="Filter by type: user, group, supergroup, channel")
+@click.option(
+    "--type",
+    "chat_type",
+    type=click.Choice(["user", "group", "supergroup", "channel"]),
+    help="Filter by chat type",
+)
 @structured_output_options
 def tg_chats(chat_type: str | None, as_json: bool, as_yaml: bool):
     """List joined Telegram chats."""
@@ -145,7 +151,7 @@ def tg_chats(chat_type: str | None, as_json: bool, as_yaml: bool):
     table.add_column("Unread", justify="right")
 
     for c in chats:
-        table.add_row(str(c["id"]), c["name"], c["type"], str(c["unread"]))
+        table.add_row(str(c["id"]), escape(c["name"] or ""), c["type"], str(c["unread"]))
 
     console.print(table)
     console.print(f"\nTotal: {len(chats)} chats")
@@ -153,7 +159,13 @@ def tg_chats(chat_type: str | None, as_json: bool, as_yaml: bool):
 
 @tg_group.command("history")
 @click.argument("chat")
-@click.option("-n", "--limit", default=1000, help="Max messages to fetch")
+@click.option(
+    "-n",
+    "--limit",
+    type=click.IntRange(min=1),
+    default=1000,
+    help="Max messages to fetch",
+)
 @structured_output_options
 def tg_history(chat: str, limit: int, as_json: bool, as_yaml: bool):
     """Fetch historical messages from CHAT (name, username, or numeric ID)."""
@@ -194,7 +206,13 @@ def tg_history(chat: str, limit: int, as_json: bool, as_yaml: bool):
 
 @tg_group.command("sync")
 @click.argument("chat")
-@click.option("-n", "--limit", default=5000, help="Max messages per sync")
+@click.option(
+    "-n",
+    "--limit",
+    type=click.IntRange(min=1),
+    default=5000,
+    help="Max messages per sync",
+)
 @structured_output_options
 def tg_sync(chat: str, limit: int, as_json: bool, as_yaml: bool):
     """Incremental sync — fetch only new messages from CHAT."""
@@ -240,7 +258,13 @@ def tg_sync(chat: str, limit: int, as_json: bool, as_yaml: bool):
 
 
 @tg_group.command("sync-all")
-@click.option("-n", "--limit", default=5000, help="Max messages per chat")
+@click.option(
+    "-n",
+    "--limit",
+    type=click.IntRange(min=1),
+    default=5000,
+    help="Max messages per chat",
+)
 @click.option(
     "--delay",
     default=1.0,
@@ -250,7 +274,7 @@ def tg_sync(chat: str, limit: int, as_json: bool, as_yaml: bool):
 @click.option(
     "--max-chats",
     default=None,
-    type=int,
+    type=click.IntRange(min=1),
     help="Max number of chats to sync per run (default: all)",
 )
 @structured_output_options
@@ -264,9 +288,11 @@ def tg_sync_all(limit: int, delay: float, max_chats: int | None, as_json: bool, 
 
             def _on_chat_done(name: str, new_count: int, total: int):
                 if new_count > 0:
-                    console.print(f"  [green]✓[/green] {name}: +{new_count} (total: {total})")
+                    console.print(
+                        f"  [green]✓[/green] {escape(name)}: +{new_count} (total: {total})"
+                    )
                 else:
-                    console.print(f"  [dim]✓ {name}: no new messages[/dim]")
+                    console.print(f"  [dim]✓ {escape(name)}: no new messages[/dim]")
 
             on_chat_done = _on_chat_done
 
@@ -298,13 +324,19 @@ def _finish_sync_report(report: dict, *, as_json: bool, as_yaml: bool) -> None:
         f" failed: {report['failed']})"
     )
     for r in list(failed_chats.values())[:10]:
-        console.print(f"  [red]✗ {r['name']}: {r['error']}[/red]")
+        console.print(f"  [red]✗ {escape(r['name'] or '')}: {escape(str(r['error']))}[/red]")
     if not ok_pass:
         raise SystemExit(1)
 
 
 @tg_group.command("refresh")
-@click.option("-n", "--limit", default=5000, help="Max messages per chat")
+@click.option(
+    "-n",
+    "--limit",
+    type=click.IntRange(min=1),
+    default=5000,
+    help="Max messages per chat",
+)
 @click.option(
     "--delay",
     default=1.0,
@@ -314,7 +346,7 @@ def _finish_sync_report(report: dict, *, as_json: bool, as_yaml: bool) -> None:
 @click.option(
     "--max-chats",
     default=None,
-    type=int,
+    type=click.IntRange(min=1),
     help="Max number of chats to sync per run (default: all)",
 )
 @structured_output_options
@@ -328,9 +360,11 @@ def tg_refresh(limit: int, delay: float, max_chats: int | None, as_json: bool, a
 
             def _on_chat_done(name: str, new_count: int, total: int):
                 if new_count > 0:
-                    console.print(f"  [green]✓[/green] {name}: +{new_count} (total: {total})")
+                    console.print(
+                        f"  [green]✓[/green] {escape(name)}: +{new_count} (total: {total})"
+                    )
                 else:
-                    console.print(f"  [dim]✓ {name}: no new messages[/dim]")
+                    console.print(f"  [dim]✓ {escape(name)}: no new messages[/dim]")
 
             on_chat_done = _on_chat_done
 
@@ -344,7 +378,14 @@ def tg_refresh(limit: int, delay: float, max_chats: int | None, as_json: bool, a
 
 @tg_group.command("backfill")
 @click.argument("chat")
-@click.option("-n", "--limit", default=2000, show_default=True, help="Messages per run")
+@click.option(
+    "-n",
+    "--limit",
+    type=click.IntRange(min=1),
+    default=2000,
+    show_default=True,
+    help="Messages per run",
+)
 @structured_output_options
 def tg_backfill(chat: str, limit: int, as_json: bool, as_yaml: bool):
     """Pull history older than the first sync captured (consumes backfill cursors).
@@ -379,6 +420,7 @@ def tg_backfill(chat: str, limit: int, as_json: bool, as_yaml: bool):
 @click.option("--persist", is_flag=True, help="Reconnect automatically if the connection drops")
 @click.option(
     "--retry-seconds",
+    type=click.IntRange(min=1),
     default=5,
     show_default=True,
     help="Reconnect delay when using --persist",
@@ -597,7 +639,14 @@ def tg_bootstrap():
 
 @tg_bootstrap.command("start")
 @click.option("--delay", default=2.0, show_default=True, help="Seconds between chat syncs")
-@click.option("-n", "--limit", default=5000, show_default=True, help="Max messages per chat")
+@click.option(
+    "-n",
+    "--limit",
+    type=click.IntRange(min=1),
+    default=5000,
+    show_default=True,
+    help="Max messages per chat",
+)
 def tg_bootstrap_start(delay: float, limit: int):
     """Arm the initial sync: starts now, auto-resumes after reboots,
     uninstalls itself after one full successful pass over all dialogs."""
@@ -717,8 +766,15 @@ def tg_bootstrap_stop():
     help="Filter by attachment kind (repeatable)",
 )
 @click.option("--msg-id", "msg_ids", multiple=True, type=int, help="Specific message IDs")
-@click.option("--hours", type=int, help="Only attachments within N hours")
-@click.option("-n", "--limit", default=20, show_default=True, help="Max files")
+@click.option("--hours", type=click.IntRange(min=1), help="Only attachments within N hours")
+@click.option(
+    "-n",
+    "--limit",
+    type=click.IntRange(min=1),
+    default=20,
+    show_default=True,
+    help="Max files",
+)
 @structured_output_options
 def tg_files(
     chat: str,
@@ -794,7 +850,7 @@ def tg_files(
         state = "✓" if r.get("local_path") else "·"
         name = r.get("file_name") or f"{r['kind']}_{r['msg_id']}"
         console.print(
-            f" {state} [dim]{ts}[/dim] [{r['kind']}] {name}"
+            f" {state} [dim]{ts}[/dim] \\[{r['kind']}] {escape(name)}"
             f" ({size // 1024} KB) msg:{r['msg_id']}"
         )
     console.print(f"\n[dim]{len(rows)} attachments (✓ = downloaded)[/dim]")

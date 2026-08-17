@@ -90,7 +90,7 @@ class TestSearch:
 
         monkeypatch.setattr(db_mod, "get_db_path", lambda: db_path)
         result = runner.invoke(cli, ["search", "Web3", "--chat", "MissingGroup"])
-        assert result.exit_code == 0
+        assert result.exit_code == 1  # errors are non-zero (#40)
         assert "Chat 'MissingGroup' not found in database." in result.output
 
     def test_search_chat_not_found_yaml(self, runner, populated_db, monkeypatch):
@@ -122,7 +122,7 @@ class TestSearch:
 
         monkeypatch.setattr(db_mod, "get_db_path", lambda: db_path)
         result = runner.invoke(cli, ["search", "(", "--regex"])
-        assert result.exit_code == 0
+        assert result.exit_code == 1  # errors are non-zero (#40)
         assert "Invalid regex pattern" in result.output
 
     def test_search_yaml(self, runner, populated_db, monkeypatch):
@@ -165,7 +165,7 @@ class TestRecent:
 
         monkeypatch.setattr(db_mod, "get_db_path", lambda: db_path)
         result = runner.invoke(cli, ["recent", "--chat", "MissingGroup"])
-        assert result.exit_code == 0
+        assert result.exit_code == 1  # errors are non-zero (#40)
         assert "Chat 'MissingGroup' not found in database." in result.output
 
 
@@ -176,7 +176,7 @@ class TestQueryChatNotFound:
 
         monkeypatch.setattr(db_mod, "get_db_path", lambda: db_path)
         result = runner.invoke(cli, ["today", "--chat", "MissingGroup"])
-        assert result.exit_code == 0
+        assert result.exit_code == 1  # errors are non-zero (#40)
         assert "Chat 'MissingGroup' not found in database." in result.output
 
     def test_top_chat_not_found(self, runner, populated_db, monkeypatch):
@@ -185,7 +185,7 @@ class TestQueryChatNotFound:
 
         monkeypatch.setattr(db_mod, "get_db_path", lambda: db_path)
         result = runner.invoke(cli, ["top", "--chat", "MissingGroup"])
-        assert result.exit_code == 0
+        assert result.exit_code == 1  # errors are non-zero (#40)
         assert "Chat 'MissingGroup' not found in database." in result.output
 
     def test_timeline_chat_not_found(self, runner, populated_db, monkeypatch):
@@ -194,7 +194,7 @@ class TestQueryChatNotFound:
 
         monkeypatch.setattr(db_mod, "get_db_path", lambda: db_path)
         result = runner.invoke(cli, ["timeline", "--chat", "MissingGroup"])
-        assert result.exit_code == 0
+        assert result.exit_code == 1  # errors are non-zero (#40)
         assert "Chat 'MissingGroup' not found in database." in result.output
 
     def test_filter_chat_not_found(self, runner, populated_db, monkeypatch):
@@ -203,7 +203,7 @@ class TestQueryChatNotFound:
 
         monkeypatch.setattr(db_mod, "get_db_path", lambda: db_path)
         result = runner.invoke(cli, ["filter", "Web3", "--chat", "MissingGroup"])
-        assert result.exit_code == 0
+        assert result.exit_code == 1  # errors are non-zero (#40)
         assert "Chat 'MissingGroup' not found in database." in result.output
 
 
@@ -494,7 +494,7 @@ class TestAmbiguousChat:
 
         monkeypatch.setattr(db_mod, "get_db_path", lambda: db_path)
         result = runner.invoke(cli, ["search", "hello", "--chat", "Dev"])
-        assert result.exit_code == 0
+        assert result.exit_code == 1  # errors are non-zero (#40)
         assert "matches multiple local chats" in result.output
         assert "Dev Group" in result.output
         assert "Dev Chat" in result.output
@@ -1041,3 +1041,140 @@ class TestExportStreaming:
         assert [m["msg_id"] for m in got[:3]] == [5000, 4999, 4998] or got[0][
             "msg_id"
         ] in (1, 5000)  # chronological ordering by timestamp
+
+
+class TestSafeRendering:
+    """#37 — hostile Telegram text must render, not crash or restyle."""
+
+    def test_rich_markup_in_message_does_not_crash(self, runner, db, monkeypatch, tmp_path):
+        from conftest import make_msg
+
+        monkeypatch.setenv("DB_PATH", str(db.db_path))
+        import tg_cli.db as db_mod
+
+        monkeypatch.setattr(db_mod, "get_db_path", lambda: db.db_path)
+        db.insert_message(
+            **make_msg(msg_id=1, content="boom [/bold] [red]x[/red] \\1 конец",
+                       sender_name="[blink]Хакер[/blink]", chat_name="Chat[/]")
+        )
+        result = runner.invoke(cli, ["recent", "--hours", "24"], env={"OUTPUT": "rich"})
+        assert result.exit_code == 0, result.output
+        assert "конец" in result.output
+
+    def test_filter_highlight_survives_group_reference(
+        self, runner, db, monkeypatch
+    ):
+        from conftest import make_msg
+
+        monkeypatch.setenv("DB_PATH", str(db.db_path))
+        import tg_cli.db as db_mod
+
+        monkeypatch.setattr(db_mod, "get_db_path", lambda: db.db_path)
+        db.insert_message(**make_msg(msg_id=1, content=r"выражение \1 и ТеКсТ"))
+        result = runner.invoke(cli, ["filter", r"\1,текст"], env={"OUTPUT": "rich"})
+        assert result.exit_code == 0, result.output
+        assert "ТеКсТ" in result.output  # original case preserved
+
+
+class TestErrorContract:
+    """#40 — one failure, one envelope, one exit code across formats."""
+
+    def test_chat_not_found_same_exit_all_formats(self, runner, populated_db, monkeypatch):
+        import json
+
+        db, db_path = populated_db
+        import tg_cli.db as db_mod
+
+        monkeypatch.setattr(db_mod, "get_db_path", lambda: db_path)
+        human = runner.invoke(cli, ["brief", "НетТакого"], env={"OUTPUT": "rich"})
+        as_json = runner.invoke(cli, ["brief", "НетТакого", "--json"])
+        as_yaml = runner.invoke(cli, ["brief", "НетТакого", "--yaml"])
+        assert human.exit_code == as_json.exit_code == as_yaml.exit_code == 1
+        env = json.loads(as_json.output)
+        assert env["ok"] is False
+        assert env["schema_version"] == "1"
+        assert env["error"]["code"] == "chat_not_found"
+        assert "message" in env["error"]
+        y = yaml.safe_load(as_yaml.output)
+        assert y["ok"] is False and y["error"]["code"] == "chat_not_found"
+
+    def test_numeric_ranges_rejected_before_side_effects(self, runner, monkeypatch):
+        import tg_cli.cli.tg as tg_mod
+
+        calls = []
+
+        async def spy(*a, **kw):
+            calls.append(1)
+            return {}
+
+        monkeypatch.setattr(tg_mod, "sync_all_dialogs", spy)
+        for args in (
+            ["refresh", "--limit", "0"],
+            ["refresh", "--limit", "-1"],
+            ["refresh", "--max-chats", "-1"],
+            ["search", "x", "--hours", "0"],
+            ["recent", "--hours", "-5"],
+        ):
+            result = runner.invoke(cli, args)
+            assert result.exit_code == 2, args
+        assert calls == []
+
+    def test_chats_type_typo_rejected(self, runner):
+        result = runner.invoke(cli, ["chats", "--type", "grup"])
+        assert result.exit_code == 2
+        assert "Invalid value" in result.output
+
+
+class TestLocalTimezone:
+    """#37 — buckets follow the local timezone, DST-correct."""
+
+    @staticmethod
+    def _set_tz(monkeypatch, tz):
+        import time as _time
+
+        monkeypatch.setenv("TZ", tz)
+        _time.tzset()
+
+    def test_timeline_buckets_moscow(self, db, monkeypatch):
+        from conftest import make_msg
+
+        self._set_tz(monkeypatch, "Europe/Moscow")
+        try:
+            # 2026-08-15 22:30 UTC == 2026-08-16 01:30 MSK
+            db.insert_message(
+                **make_msg(msg_id=1, content="ночь") |
+                {"timestamp": __import__("datetime").datetime(
+                    2026, 8, 15, 22, 30,
+                    tzinfo=__import__("datetime").timezone.utc)}
+            )
+            buckets = db.timeline(chat_id=100)
+            assert buckets[0]["period"] == "2026-08-16"
+        finally:
+            self._set_tz(monkeypatch, "UTC")
+
+    def test_timeline_dst_transitions_new_york(self, db, monkeypatch):
+        import datetime as dt
+
+        from conftest import make_msg
+
+        self._set_tz(monkeypatch, "America/New_York")
+        try:
+            # Spring forward 2026-03-08: 06:59 UTC is EST (01:59 local, Mar 8),
+            # 07:01 UTC is EDT (03:01 local, Mar 8).
+            db.insert_message(**make_msg(msg_id=1) | {
+                "timestamp": dt.datetime(2026, 3, 8, 6, 59, tzinfo=dt.timezone.utc)})
+            db.insert_message(**make_msg(msg_id=2) | {
+                "timestamp": dt.datetime(2026, 3, 8, 7, 1, tzinfo=dt.timezone.utc)})
+            # Fall back 2026-11-01: 05:30 UTC is EDT (01:30), 06:30 UTC is EST (01:30)
+            db.insert_message(**make_msg(msg_id=3) | {
+                "timestamp": dt.datetime(2026, 11, 1, 5, 30, tzinfo=dt.timezone.utc)})
+            db.insert_message(**make_msg(msg_id=4) | {
+                "timestamp": dt.datetime(2026, 11, 1, 6, 30, tzinfo=dt.timezone.utc)})
+            buckets = {b["period"]: b["msg_count"] for b in db.timeline(chat_id=100)}
+            assert buckets == {"2026-03-08": 2, "2026-11-01": 2}
+            hours = {b["period"]: b["msg_count"]
+                     for b in db.timeline(chat_id=100, granularity="hour")}
+            # both fall-back timestamps land in the repeated 01:00 local hour
+            assert hours["2026-11-01T01"] == 2
+        finally:
+            self._set_tz(monkeypatch, "UTC")

@@ -1,5 +1,6 @@
 """Shared chat resolution helpers for CLI commands."""
 
+from rich.markup import escape
 from rich.table import Table
 
 from ..console import console
@@ -31,8 +32,9 @@ def resolve_chat_id_or_print(
             return None
         if emit_error("chat_not_found", f"Chat '{chat}' not found in database."):
             raise SystemExit(1) from None
-        console.print(f"[red]Chat '{chat}' not found in database.[/red]")
-        return None
+        console.print(f"[red]Chat '{escape(chat)}' not found in database.[/red]")
+        # Same failure — same non-zero exit code in every output mode (#40).
+        raise SystemExit(1)
 
     if len(matches) == 1:
         return matches[0]["chat_id"]
@@ -44,7 +46,7 @@ def resolve_chat_id_or_print(
     for match in matches[:10]:
         table.add_row(
             str(match["chat_id"]),
-            match.get("chat_name") or "—",
+            escape(match.get("chat_name") or "—"),
             str(match.get("msg_count") or 0),
         )
 
@@ -54,7 +56,7 @@ def resolve_chat_id_or_print(
         details={"query": chat, "matches": matches[:10]},
     ):
         raise SystemExit(1) from None
-    console.print(f"[red]Chat '{chat}' matches multiple local chats.[/red]")
+    console.print(f"[red]Chat '{escape(chat)}' matches multiple local chats.[/red]")
     console.print(table)
     console.print("[yellow]Use a more specific name or the numeric chat ID.[/yellow]")
-    return None
+    raise SystemExit(1)

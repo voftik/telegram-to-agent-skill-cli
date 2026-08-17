@@ -16,7 +16,7 @@ def data_group():
 @click.argument("chat")
 @click.option("-f", "--format", "fmt", type=click.Choice(["text", "json", "yaml"]), default="text")
 @click.option("-o", "--output", "output_file", help="Output file path")
-@click.option("--hours", type=int, help="Only export last N hours")
+@click.option("--hours", type=click.IntRange(min=1), help="Only export last N hours")
 def export(chat: str, fmt: str, output_file: str | None, hours: int | None):
     """Export ALL messages of CHAT to text, JSON, or YAML.
 

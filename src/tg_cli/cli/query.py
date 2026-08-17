@@ -4,6 +4,7 @@ import asyncio
 from collections import defaultdict
 
 import click
+from rich.markup import escape
 from rich.table import Table
 
 from ..console import console
@@ -38,16 +39,17 @@ def _maybe_sync_first(chat: str | None, sync_first: bool, sync_limit: int) -> No
 @click.argument("keyword")
 @click.option("-c", "--chat", help="Filter by chat name")
 @click.option("-s", "--sender", help="Filter by sender name")
-@click.option("--hours", type=int, help="Only search messages within N hours")
+@click.option("--hours", type=click.IntRange(min=1), help="Only search messages within N hours")
 @click.option("--regex", "use_regex", is_flag=True, help="Treat KEYWORD as a regex pattern")
 @click.option("--sync-first", is_flag=True, help="Refresh local cache before searching")
 @click.option(
     "--sync-limit",
+    type=click.IntRange(min=1),
     default=5000,
     show_default=True,
     help="Max messages per chat when using --sync-first",
 )
-@click.option("-n", "--limit", default=50, help="Max results")
+@click.option("-n", "--limit", type=click.IntRange(min=1), default=50, help="Max results")
 @structured_output_options
 def search(
     keyword: str,
@@ -92,8 +94,8 @@ def search(
         except re.error as exc:
             if emit_error("invalid_regex", f"Invalid regex pattern: {exc}"):
                 raise SystemExit(1) from None
-            console.print(f"[red]Invalid regex pattern: {exc}[/red]")
-            return
+            console.print(f"[red]Invalid regex pattern: {escape(str(exc))}[/red]")
+            raise SystemExit(1) from None
 
     if results and emit_structured(results, as_json=as_json, as_yaml=as_yaml):
         return
@@ -111,7 +113,8 @@ def search(
         chat_name = msg.get("chat_name") or ""
         content = (msg.get("content") or "")[:200]
         console.print(
-            f"[dim]{ts}[/dim] [cyan]{chat_name}[/cyan] | [bold]{row_sender}[/bold]: {content}"
+            f"[dim]{ts}[/dim] [cyan]{escape(chat_name)}[/cyan] |"
+            f" [bold]{escape(row_sender)}[/bold]: {escape(content)}"
         )
 
     filters = []
@@ -132,6 +135,7 @@ def search(
 @click.option("--sync-first", is_flag=True, help="Refresh this chat before building the brief")
 @click.option(
     "--sync-limit",
+    type=click.IntRange(min=1),
     default=5000,
     show_default=True,
     help="Max messages per chat when using --sync-first",
@@ -156,7 +160,7 @@ def brief(chat: str, sync_first: bool, sync_limit: int, as_json: bool, as_yaml: 
     if emit_structured(info, as_json=as_json, as_yaml=as_yaml):
         return
 
-    console.print(f"[bold cyan]{info['chat_name']}[/bold cyan] (id: {chat_id})")
+    console.print(f"[bold cyan]{escape(info['chat_name'] or '')}[/bold cyan] (id: {chat_id})")
     console.print(
         f"  messages: [bold]{info['total']}[/bold]"
         f"  (7d: {info['msgs_7d']}, 30d: {info['msgs_30d']})"
@@ -167,7 +171,8 @@ def brief(chat: str, sync_first: bool, sync_limit: int, as_json: bool, as_yaml: 
         console.print(f"  peak days: {days}")
     if info["top_senders"]:
         senders = ", ".join(
-            f"{s['sender_name']} ({s['msg_count']})" for s in info["top_senders"]
+            f"{escape(s['sender_name'] or '')} ({s['msg_count']})"
+            for s in info["top_senders"]
         )
         console.print(f"  top senders: {senders}")
     if info["attachments"]:
@@ -180,13 +185,20 @@ def brief(chat: str, sync_first: bool, sync_limit: int, as_json: bool, as_yaml: 
 
 @query_group.command("links")
 @click.argument("chat", required=False)
-@click.option("--hours", type=int, help="Only links within N hours")
+@click.option("--hours", type=click.IntRange(min=1), help="Only links within N hours")
 @click.option(
     "--kind",
     type=click.Choice(["gdoc", "gsheet", "gslides", "tme", "web"]),
     help="Filter by link kind",
 )
-@click.option("-n", "--limit", default=100, show_default=True, help="Max results")
+@click.option(
+    "-n",
+    "--limit",
+    type=click.IntRange(min=1),
+    default=100,
+    show_default=True,
+    help="Max results",
+)
 @structured_output_options
 def links_cmd(
     chat: str | None,
@@ -215,8 +227,8 @@ def links_cmd(
     for r in results:
         ts = (r.get("timestamp") or "")[:16]
         console.print(
-            f"[dim]{ts}[/dim] [cyan]{r.get('chat_name') or ''}[/cyan]"
-            f" [{r['kind']}] {r['url']}"
+            f"[dim]{ts}[/dim] [cyan]{escape(r.get('chat_name') or '')}[/cyan]"
+            f" \\[{r['kind']}] {escape(r['url'])}"
         )
     console.print(f"\n[dim]{len(results)} links[/dim]")
 
@@ -282,17 +294,25 @@ def thread_cmd(
         sender = m2.get("sender_name") or "Unknown"
         marker = "↳ " if m2.get("reply_to_msg_id") else ""
         console.print(
-            f"[dim]{ts}[/dim] {marker}[bold]{sender}[/bold]:"
-            f" {(m2.get('content') or '')[:300]}"
+            f"[dim]{ts}[/dim] {marker}[bold]{escape(sender)}[/bold]:"
+            f" {escape((m2.get('content') or '')[:300])}"
         )
     console.print(f"\n[dim]{len(msgs)} messages in thread[/dim]")
 
 
 @query_group.command("style")
 @click.option("-c", "--chat", help="Restrict corpus to one chat")
-@click.option("-n", "--limit", default=500, show_default=True, help="Max messages")
+@click.option(
+    "-n",
+    "--limit",
+    type=click.IntRange(min=1),
+    default=500,
+    show_default=True,
+    help="Max messages",
+)
 @click.option(
     "--min-len",
+    type=click.IntRange(min=0),
     default=15,
     show_default=True,
     help="Skip messages shorter than N characters",
@@ -333,14 +353,21 @@ def style_cmd(
         console.print("[yellow]No own messages in local cache yet.[/yellow]")
         return
     for m3 in corpus[:50]:
-        console.print(f"[dim]{(m3.get('timestamp') or '')[:10]}[/dim] {m3['content'][:200]}")
+        stamp = (m3.get("timestamp") or "")[:10]
+        console.print(f"[dim]{stamp}[/dim] {escape(m3['content'][:200])}")
     console.print(f"\n[dim]{len(corpus)} messages (showing up to 50; use --yaml for all)[/dim]")
 
 
 @query_group.command("recent")
 @click.option("-c", "--chat", help="Filter by chat name")
 @click.option("-s", "--sender", help="Filter by sender name")
-@click.option("--hours", type=int, default=24, show_default=True, help="Only show last N hours")
+@click.option(
+    "--hours",
+    type=click.IntRange(min=1),
+    default=24,
+    show_default=True,
+    help="Only show last N hours",
+)
 @click.option(
     "--sync-first",
     is_flag=True,
@@ -348,11 +375,12 @@ def style_cmd(
 )
 @click.option(
     "--sync-limit",
+    type=click.IntRange(min=1),
     default=5000,
     show_default=True,
     help="Max messages per chat when using --sync-first",
 )
-@click.option("-n", "--limit", default=50, help="Max messages")
+@click.option("-n", "--limit", type=click.IntRange(min=1), default=50, help="Max messages")
 @structured_output_options
 def recent(
     chat: str | None,
@@ -389,7 +417,8 @@ def recent(
         chat_name = msg.get("chat_name") or ""
         content = (msg.get("content") or "")[:200].replace("\n", " ")
         console.print(
-            f"[dim]{ts}[/dim] [cyan]{chat_name}[/cyan] | [bold]{sender_name}[/bold]: {content}"
+            f"[dim]{ts}[/dim] [cyan]{escape(chat_name)}[/cyan] |"
+            f" [bold]{escape(sender_name)}[/bold]: {escape(content)}"
         )
 
     filters = [f"hours={hours}"]
@@ -404,6 +433,7 @@ def recent(
 @click.option("--sync-first", is_flag=True, help="Refresh local cache before calculating stats")
 @click.option(
     "--sync-limit",
+    type=click.IntRange(min=1),
     default=5000,
     show_default=True,
     help="Max messages per chat when using --sync-first",
@@ -441,7 +471,7 @@ def stats(sync_first: bool, sync_limit: int, as_json: bool, as_yaml: bool):
 
 @query_group.command("top")
 @click.option("-c", "--chat", help="Filter by chat name")
-@click.option("--hours", type=int, help="Only count messages within N hours")
+@click.option("--hours", type=click.IntRange(min=1), help="Only count messages within N hours")
 @click.option(
     "--sync-first",
     is_flag=True,
@@ -449,11 +479,12 @@ def stats(sync_first: bool, sync_limit: int, as_json: bool, as_yaml: bool):
 )
 @click.option(
     "--sync-limit",
+    type=click.IntRange(min=1),
     default=5000,
     show_default=True,
     help="Max messages per chat when using --sync-first",
 )
-@click.option("-n", "--limit", default=20, help="Top N senders")
+@click.option("-n", "--limit", type=click.IntRange(min=1), default=20, help="Top N senders")
 @structured_output_options
 def top(
     chat: str | None,
@@ -503,7 +534,7 @@ def top(
 
 @query_group.command("timeline")
 @click.option("-c", "--chat", help="Filter by chat name")
-@click.option("--hours", type=int, help="Only show last N hours")
+@click.option("--hours", type=click.IntRange(min=1), help="Only show last N hours")
 @click.option("--by", "granularity", type=click.Choice(["day", "hour"]), default="day")
 @click.option(
     "--sync-first",
@@ -512,6 +543,7 @@ def top(
 )
 @click.option(
     "--sync-limit",
+    type=click.IntRange(min=1),
     default=5000,
     show_default=True,
     help="Max messages per chat when using --sync-first",
@@ -564,6 +596,7 @@ def timeline(
 )
 @click.option(
     "--sync-limit",
+    type=click.IntRange(min=1),
     default=5000,
     show_default=True,
     help="Max messages per chat when using --sync-first",
@@ -613,12 +646,21 @@ def today(chat: str | None, sync_first: bool, sync_limit: int, as_json: bool, as
         grouped[m.get("chat_name") or "Unknown"].append(m)
 
     for chat_name, chat_msgs in sorted(grouped.items(), key=lambda x: -len(x[1])):
-        console.print(f"\n[bold cyan]═══ {chat_name} ({len(chat_msgs)} msgs) ═══[/bold cyan]")
+        console.print(
+            f"\n[bold cyan]═══ {escape(chat_name)} ({len(chat_msgs)} msgs) ═══[/bold cyan]"
+        )
         for m in chat_msgs:
-            ts = (m.get("timestamp") or "")[11:19]
+            # Human timestamps in the user's local timezone (#37);
+            # structured output keeps explicit UTC offsets.
+            try:
+                ts = datetime.fromisoformat(m["timestamp"]).astimezone().strftime("%H:%M:%S")
+            except (ValueError, KeyError):
+                ts = (m.get("timestamp") or "")[11:19]
             sender = m.get("sender_name") or "Unknown"
             content = (m.get("content") or "")[:200].replace("\n", " ")
-            console.print(f"  [dim]{ts}[/dim] [bold]{sender[:15]}[/bold]: {content}")
+            console.print(
+                f"  [dim]{ts}[/dim] [bold]{escape(sender[:15])}[/bold]: {escape(content)}"
+            )
 
     console.print(f"\n[green]Total: {len(msgs)} messages today[/green]")
 
@@ -626,10 +668,15 @@ def today(chat: str | None, sync_first: bool, sync_limit: int, as_json: bool, as
 @query_group.command("filter")
 @click.argument("keywords")
 @click.option("-c", "--chat", help="Filter by chat name")
-@click.option("--hours", type=int, help="Only search last N hours (default: today)")
+@click.option(
+    "--hours",
+    type=click.IntRange(min=1),
+    help="Only search last N hours (default: today)",
+)
 @click.option("--sync-first", is_flag=True, help="Refresh local cache before filtering")
 @click.option(
     "--sync-limit",
+    type=click.IntRange(min=1),
     default=5000,
     show_default=True,
     help="Max messages per chat when using --sync-first",
@@ -695,21 +742,25 @@ def filter_msgs(
         grouped[m.get("chat_name") or "Unknown"].append(m)
 
     for chat_name, chat_msgs in sorted(grouped.items(), key=lambda x: -len(x[1])):
-        console.print(f"\n[bold cyan]═══ {chat_name} ({len(chat_msgs)} matches) ═══[/bold cyan]")
+        console.print(
+            f"\n[bold cyan]═══ {escape(chat_name)} ({len(chat_msgs)} matches) ═══[/bold cyan]"
+        )
         for m in chat_msgs:
             ts = (m.get("timestamp") or "")[:19]
             sender = m.get("sender_name") or "Unknown"
-            content = (m.get("content") or "")[:300].replace("\n", " ")
-            # Highlight keywords
+            content = escape((m.get("content") or "")[:300].replace("\n", " "))
+            # Highlight via a callback: the match itself is the replacement,
+            # so user text can never inject group references (#37) and the
+            # original case is preserved.
             for kw in keyword_list:
                 content = re.sub(
-                    re.escape(kw),
-                    f"[bold red]{kw}[/bold red]",
+                    re.escape(escape(kw)),
+                    lambda mm: f"[bold red]{mm.group(0)}[/bold red]",
                     content,
                     flags=re.IGNORECASE,
                 )
             console.print(
-                f"  [dim]{ts}[/dim] [bold]{sender[:15]}[/bold]: ",
+                f"  [dim]{ts}[/dim] [bold]{escape(sender[:15])}[/bold]: ",
                 end="",
             )
             console.print(content, markup=True, highlight=False)
