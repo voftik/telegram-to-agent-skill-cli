@@ -45,6 +45,15 @@ npx telegram-to-agent-skill-cli
 
 Разработчики клонируют репозиторий и запускают `./install.sh`: тот ставит editable-версию и открывает тот же визард. Подробности: [docs/INSTALL.md](docs/INSTALL.md).
 
+Пользователи Claude Code могут подключить репозиторий как маркетплейс плагинов, тогда навык ставится без терминала:
+
+```
+/plugin marketplace add voftik/telegram-to-agent-skill-cli
+/plugin install telegram-context@telegram-to-agent-skill-cli
+```
+
+Сам CLI приходит с PyPI: если команда `tg` не найдена, навык подскажет команду установки.
+
 ## Обновление
 
 ```bash

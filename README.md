@@ -45,6 +45,15 @@ npx telegram-to-agent-skill-cli
 
 Developers clone the repo and run `./install.sh` (editable install, same wizard). Details: [docs/INSTALL.md](docs/INSTALL.md).
 
+Claude Code users can also add the repo as a plugin marketplace, which installs the skill without touching the shell:
+
+```
+/plugin marketplace add voftik/telegram-to-agent-skill-cli
+/plugin install telegram-context@telegram-to-agent-skill-cli
+```
+
+The CLI itself still comes from PyPI (the skill will tell you the install command if `tg` is missing).
+
 ## Update
 
 ```bash

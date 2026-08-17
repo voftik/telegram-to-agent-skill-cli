@@ -103,6 +103,26 @@ def main() -> None:
             if sdist_skill.get(name) != data:
                 fail(f"skill file differs between sdist and wheel: {name}")
 
+    # The Claude Code plugin layout (skills/tg) must stay a byte-identical
+    # copy of the packaged skill — marketplace installs pin to git commits.
+    plugin_skill = Path("skills/tg")
+    packaged = Path("src/tg_cli/skill")
+    if plugin_skill.is_dir():
+        for f in packaged.rglob("*"):
+            if f.is_dir():
+                continue
+            rel = f.relative_to(packaged)
+            twin = plugin_skill / rel
+            if not twin.is_file():
+                fail(
+                    f"plugin skill misses {rel} — resync: "
+                    "rm -rf skills/tg && cp -R src/tg_cli/skill skills/tg"
+                )
+            if twin.read_bytes() != f.read_bytes():
+                fail(f"plugin skill differs at {rel} — resync skills/tg from src/tg_cli/skill")
+    else:
+        fail("skills/tg plugin copy missing")
+
     print(f"OK: {sdists[-1].name} and {wheels[-1].name} honour the contract")
 
 
