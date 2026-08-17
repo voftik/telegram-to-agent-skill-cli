@@ -72,9 +72,15 @@ def search(
             return
         try:
             if use_regex:
-                results = db.search_regex(
+                regex_res = db.search_regex(
                     keyword, chat_id=chat_id, sender=sender, hours=hours, limit=limit
                 )
+                results = regex_res["results"]
+                if regex_res["truncated"]:
+                    console.print(
+                        f"[yellow]⚠ regex scan capped at {db.MAX_REGEX_SCAN} rows —"
+                        " narrow the query with -c/--hours[/yellow]"
+                    )
             else:
                 results = db.search(
                     keyword,
@@ -100,11 +106,12 @@ def search(
 
     for msg in results:
         ts = (msg.get("timestamp") or "")[:19]
-        sender = msg.get("sender_name") or "Unknown"
+        # NB: do not shadow the `sender` filter argument with row data (#38)
+        row_sender = msg.get("sender_name") or "Unknown"
         chat_name = msg.get("chat_name") or ""
         content = (msg.get("content") or "")[:200]
         console.print(
-            f"[dim]{ts}[/dim] [cyan]{chat_name}[/cyan] | [bold]{sender}[/bold]: {content}"
+            f"[dim]{ts}[/dim] [cyan]{chat_name}[/cyan] | [bold]{row_sender}[/bold]: {content}"
         )
 
     filters = []
@@ -227,17 +234,29 @@ def thread_cmd(
     as_yaml: bool,
 ):
     """Reconstruct the reply thread around one message, in chronological order."""
-    import re as _re
-
     if tme_url:
-        m = _re.search(r"t\.me/c/(\d+)/(\d+)", tme_url)
-        if not m:
-            if emit_error("bad_url", "Only t.me/c/<chat>/<msg> links are supported."):
+        from ..links import parse_tme_message_link
+
+        parsed = parse_tme_message_link(tme_url)
+        if parsed is None:
+            message = (
+                "Not a Telegram message link. Supported: t.me/c/<id>/<msg>,"
+                " t.me/<username>/<msg> (incl. topic forms)."
+            )
+            if emit_error("bad_url", message):
                 raise SystemExit(1) from None
-            console.print("[red]Only t.me/c/<chat>/<msg> links are supported.[/red]")
-            return
-        # t.me/c/ links carry the bare channel id; the DB keys on marked IDs.
-        resolved_chat_id, msg_id = -(1_000_000_000_000 + int(m.group(1))), int(m.group(2))
+            console.print(f"[red]{message}[/red]")
+            raise SystemExit(1)
+        chat_ref, msg_id = parsed
+        if isinstance(chat_ref, int):
+            resolved_chat_id = chat_ref
+        else:
+            # Public link: resolve the username against local chat names.
+            with MessageDB() as db:
+                resolved = resolve_chat_id_or_print(db, chat_ref)
+            if resolved is None:
+                return
+            resolved_chat_id = resolved
     else:
         if not chat or msg_id is None:
             if emit_error("missing_args", "Provide CHAT and --msg-id, or --url."):
@@ -563,6 +582,13 @@ def today(chat: str | None, sync_first: bool, sync_limit: int, as_json: bool, as
         msgs = db.get_today(chat_id=chat_id)
         latest_ts = db.get_latest_timestamp(chat_id=chat_id)
 
+    if len(msgs) >= 5000:
+        # console prints to stderr — the warning never corrupts stdout data
+        console.print(
+            "[yellow]⚠ showing the first 5000 messages of today —"
+            " narrow with -c CHAT[/yellow]"
+        )
+
     if msgs and emit_structured(msgs, as_json=as_json, as_yaml=as_yaml):
         return
 
@@ -643,6 +669,10 @@ def filter_msgs(
 
         if hours:
             msgs = db.get_recent(chat_id=chat_id, hours=hours, limit=100000)
+            if len(msgs) >= 100000:
+                console.print(
+                    "[yellow]⚠ scan capped at 100000 messages — narrow the window[/yellow]"
+                )
         else:
             msgs = db.get_today(chat_id=chat_id)
 

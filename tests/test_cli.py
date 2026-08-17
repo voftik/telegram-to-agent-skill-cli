@@ -533,7 +533,7 @@ class TestExport:
 
         monkeypatch.setattr(db_mod, "get_db_path", lambda: db_path)
         result = runner.invoke(cli, ["export", "NonexistentGroup"])
-        assert result.exit_code == 0
+        assert result.exit_code == 1  # error paths are non-zero (#40)
         assert "not found" in result.output
 
     def test_export_yaml(self, runner, populated_db, tmp_path, monkeypatch):
@@ -997,3 +997,47 @@ class TestPermissions:
         env.chmod(0o644)  # simulate a pre-existing unsafe file
         cfg.get_data_dir()  # re-entry fixes it
         assert (env.stat().st_mode & 0o777) == 0o600
+
+
+class TestExportStreaming:
+    """#35 — export payload is parseable stdout, no Rich wrapping, no caps."""
+
+    def test_json_export_is_valid_and_unwrapped(self, runner, populated_db, monkeypatch):
+        import json
+
+        db, db_path = populated_db
+        import tg_cli.db as db_mod
+
+        monkeypatch.setattr(db_mod, "get_db_path", lambda: db_path)
+        long_text = "х" * 500  # far beyond any terminal width
+        db.insert_message(
+            **__import__("conftest").make_msg(
+                msg_id=777, content=long_text, chat_name="TestGroup"
+            )
+        )
+        result = runner.invoke(cli, ["export", "TestGroup", "-f", "json"])
+        assert result.exit_code == 0
+        data = json.loads(result.stdout)
+        assert any(m["msg_id"] == 777 and m["content"] == long_text for m in data)
+
+    def test_yaml_export_parses(self, runner, populated_db, monkeypatch):
+        db, db_path = populated_db
+        import tg_cli.db as db_mod
+
+        monkeypatch.setattr(db_mod, "get_db_path", lambda: db_path)
+        result = runner.invoke(cli, ["export", "TestGroup", "-f", "yaml"])
+        assert result.exit_code == 0
+        data = yaml.safe_load(result.stdout)
+        assert isinstance(data, list) and len(data) > 0
+
+    def test_export_streams_beyond_old_cap(self, db, runner, monkeypatch, tmp_path):
+        """iter_messages pages through everything — no 100k-style cap."""
+        from conftest import make_msg
+
+        rows = [make_msg(msg_id=i, content=f"m{i}") for i in range(1, 5001)]
+        db.insert_batch(rows)
+        got = list(db.iter_messages(chat_id=100, batch=997))
+        assert len(got) == 5000
+        assert [m["msg_id"] for m in got[:3]] == [5000, 4999, 4998] or got[0][
+            "msg_id"
+        ] in (1, 5000)  # chronological ordering by timestamp

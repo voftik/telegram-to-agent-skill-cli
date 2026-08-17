@@ -95,16 +95,44 @@ class TestSearch:
     def test_search_regex_found(self, db):
         db.insert_message(**make_msg(msg_id=1, content="Rust and Go"))
         db.insert_message(**make_msg(msg_id=2, content="Python only"))
-        results = db.search_regex(r"Rust.*Go")
-        assert len(results) == 1
-        assert results[0]["content"] == "Rust and Go"
+        res = db.search_regex(r"Rust.*Go")
+        assert len(res["results"]) == 1
+        assert res["results"][0]["content"] == "Rust and Go"
+        assert res["truncated"] is False
 
     def test_search_regex_with_sender_filter(self, db):
         db.insert_message(**make_msg(msg_id=1, sender_name="Alice", content="Rust remote"))
         db.insert_message(**make_msg(msg_id=2, sender_name="Bob", content="Rust remote"))
-        results = db.search_regex(r"rust\s+remote", sender="Ali")
-        assert len(results) == 1
-        assert results[0]["sender_name"] == "Alice"
+        res = db.search_regex(r"rust\s+remote", sender="Ali")
+        assert len(res["results"]) == 1
+        assert res["results"][0]["sender_name"] == "Alice"
+
+    def test_search_regex_finds_rare_old_match(self, db):
+        """601 messages, the only match is the oldest one, limit=1 —
+        the paging must reach it (#38)."""
+        db.insert_message(**make_msg(msg_id=1, content="единственное совпадение REDKOE"))
+        msgs = [make_msg(msg_id=i, content=f"шум {i}") for i in range(2, 602)]
+        db.insert_batch(msgs)
+        res = db.search_regex(r"REDKOE", limit=1)
+        assert len(res["results"]) == 1
+        assert res["results"][0]["msg_id"] == 1
+
+    def test_search_regex_scan_cap_flags_truncated(self, db, monkeypatch):
+        monkeypatch.setattr(type(db), "MAX_REGEX_SCAN", 50)
+        db.insert_batch([make_msg(msg_id=i, content=f"шум {i}") for i in range(1, 101)])
+        res = db.search_regex(r"нет-такого")
+        assert res["results"] == []
+        assert res["truncated"] is True
+
+    def test_like_fallback_unicode_casefold(self, db):
+        db.insert_message(**make_msg(msg_id=1, content="Обсуждение Проекта"))
+        assert len(db._search_like("проекта", None, None, None, 10)) == 1
+
+    def test_like_fallback_wildcards_are_literal(self, db):
+        db.insert_message(**make_msg(msg_id=1, content="скидка 100% сегодня"))
+        db.insert_message(**make_msg(msg_id=2, content="цена 1000 рублей"))
+        results = db._search_like("100%", None, None, None, 10)
+        assert [r["msg_id"] for r in results] == [1]
 
 
 # ─────────────────────── get_recent ───────────────────────

@@ -205,3 +205,69 @@ class TestExtractMessageMeta:
         assert meta["reply_to_msg_id"] is None
         assert meta["has_media"] is False
         assert meta["links"] == []
+
+
+class TestStructuralClassify:
+    """#41 — hostname/scheme-based classification, no substring tricks."""
+
+    def test_foreign_host_with_google_in_query_stays_web(self):
+        url = "https://evil.example/redirect?to=docs.google.com/document/d/x/edit"
+        kind, fetch = classify(url)
+        assert kind == "web"
+        assert fetch == url  # no rewrite to another address
+
+    def test_uppercase_host_and_trailing_dot(self):
+        kind, fetch = classify("HTTPS://DOCS.GOOGLE.COM./document/d/abc123/edit")
+        assert kind == "gdoc"
+        assert fetch == "https://docs.google.com/document/d/abc123/export?format=txt"
+
+    def test_google_u0_path_form(self):
+        kind, fetch = classify("https://docs.google.com/spreadsheets/u/0/d/sheet42/edit#gid=7")
+        assert kind == "gsheet"
+        assert fetch == "https://docs.google.com/spreadsheets/d/sheet42/export?format=csv&gid=7"
+
+    def test_non_http_scheme_not_fetched(self):
+        kind, fetch = classify("tg://resolve?domain=somebody")
+        assert kind == "web"
+        assert fetch is None
+
+    def test_tme_private_and_topic_links(self):
+        assert classify("https://t.me/c/1307778786/35896") == ("tme", None)
+        assert classify("https://t.me/c/1307778786/12/35896") == ("tme", None)
+
+    def test_tme_public_message_link(self):
+        assert classify("https://t.me/durov/123") == ("tme", None)
+
+    def test_tme_profile_and_invite_are_web(self):
+        kind, fetch = classify("https://t.me/durov")
+        assert (kind, fetch) == ("web", "https://t.me/durov")
+        kind, fetch = classify("https://t.me/+AbCdEfGh123")
+        assert (kind, fetch) == ("web", "https://t.me/+AbCdEfGh123")
+
+
+class TestParseTmeMessageLink:
+    def test_private(self):
+        from tg_cli.links import parse_tme_message_link
+
+        assert parse_tme_message_link("https://t.me/c/1307778786/35896") == (
+            -1001307778786,
+            35896,
+        )
+
+    def test_private_topic_takes_last_number(self):
+        from tg_cli.links import parse_tme_message_link
+
+        assert parse_tme_message_link("https://t.me/c/555/12/900") == (
+            -1000000000555,
+            900,
+        )
+
+    def test_public_returns_username(self):
+        from tg_cli.links import parse_tme_message_link
+
+        assert parse_tme_message_link("t.me/mychannel/42") == ("mychannel", 42)
+
+    def test_profile_is_none(self):
+        from tg_cli.links import parse_tme_message_link
+
+        assert parse_tme_message_link("https://t.me/mychannel") is None

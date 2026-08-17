@@ -207,6 +207,11 @@ class MessageDB:
             self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(str(self.db_path))
+        # Unicode-correct case-insensitive matching for the LIKE fallback:
+        # SQLite's LIKE folds ASCII only, so «проект» misses «Проекта» (#38).
+        self.conn.create_function(
+            "py_casefold", 1, lambda s: s.casefold() if s is not None else None
+        )
         from .config import harden_path
 
         # chmod before WAL side-files appear — they inherit these modes (#28)
@@ -550,14 +555,16 @@ class MessageDB:
         hours: int | None,
         limit: int,
     ) -> list[dict]:
-        query = "SELECT * FROM messages WHERE content LIKE ?"
-        params: list[Any] = [f"%{keyword}%"]
+        """Literal substring fallback: Unicode-casefolded, and `%`/`_` in the
+        query are plain characters, not wildcards (#38)."""
+        query = "SELECT * FROM messages WHERE instr(py_casefold(content), ?) > 0"
+        params: list[Any] = [keyword.casefold()]
         if chat_id is not None:
             query += " AND chat_id = ?"
             params.append(chat_id)
         if sender is not None:
-            query += " AND sender_name LIKE ?"
-            params.append(f"%{sender}%")
+            query += " AND instr(py_casefold(sender_name), ?) > 0"
+            params.append(sender.casefold())
         if hours is not None:
             cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
             query += " AND timestamp >= ?"
@@ -567,6 +574,10 @@ class MessageDB:
         rows = self.conn.execute(query, params).fetchall()
         return [dict(r) for r in rows]
 
+    # Guard against pathologically expensive scans: regex runs in Python
+    # over candidate rows; the scan is capped and the result says so (#38).
+    MAX_REGEX_SCAN = 200_000
+
     def search_regex(
         self,
         pattern: str,
@@ -574,34 +585,58 @@ class MessageDB:
         sender: str | None = None,
         hours: int | None = None,
         limit: int = 50,
-    ) -> list[dict]:
-        """Search messages by regex pattern."""
-        regex = re.compile(pattern, re.IGNORECASE)
-        query = "SELECT * FROM messages WHERE content IS NOT NULL"
-        params: list[Any] = []
-        if chat_id is not None:
-            query += " AND chat_id = ?"
-            params.append(chat_id)
-        if sender is not None:
-            query += " AND sender_name LIKE ?"
-            params.append(f"%{sender}%")
-        if hours is not None:
-            cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
-            query += " AND timestamp >= ?"
-            params.append(cutoff)
-        query += " ORDER BY timestamp DESC LIMIT ?"
-        params.append(limit * 10)
+    ) -> dict:
+        """Regex search over the full eligible range, newest first.
 
-        rows = self.conn.execute(query, params).fetchall()
+        Pages through candidates by keyset (id DESC) until `limit` matches
+        are found or the range is exhausted, so a rare old match is not
+        lost to an arbitrary candidate window. Returns
+        {"results": [...], "scanned": int, "truncated": bool}.
+        """
+        regex = re.compile(pattern, re.IGNORECASE)
         results: list[dict] = []
-        for row in rows:
-            msg = dict(row)
-            content = msg.get("content") or ""
-            if regex.search(content):
-                results.append(msg)
-                if len(results) >= limit:
+        scanned = 0
+        last_id: int | None = None
+        truncated = False
+        page_size = 5000
+
+        while len(results) < limit:
+            query = "SELECT * FROM messages WHERE content IS NOT NULL"
+            params: list[Any] = []
+            if chat_id is not None:
+                query += " AND chat_id = ?"
+                params.append(chat_id)
+            if sender is not None:
+                query += " AND instr(py_casefold(sender_name), ?) > 0"
+                params.append(sender.casefold())
+            if hours is not None:
+                cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+                query += " AND timestamp >= ?"
+                params.append(cutoff)
+            if last_id is not None:
+                query += " AND id < ?"
+                params.append(last_id)
+            query += " ORDER BY id DESC LIMIT ?"
+            params.append(page_size)
+
+            rows = self.conn.execute(query, params).fetchall()
+            if not rows:
+                break
+            for row in rows:
+                scanned += 1
+                if scanned > self.MAX_REGEX_SCAN:
+                    truncated = True
                     break
-        return results
+                msg = dict(row)
+                if regex.search(msg.get("content") or ""):
+                    results.append(msg)
+                    if len(results) >= limit:
+                        break
+            if truncated or len(results) >= limit:
+                break
+            last_id = rows[-1]["id"]
+
+        return {"results": results, "scanned": scanned, "truncated": truncated}
 
     def get_recent(
         self,
@@ -629,6 +664,33 @@ class MessageDB:
         )
         rows = self.conn.execute(query, params + [limit]).fetchall()
         return [dict(r) for r in rows]
+
+    def iter_messages(self, chat_id: int | None = None, hours: int | None = None,
+                      batch: int = 2000):
+        """Stream messages chronologically via keyset pagination (#35) —
+        full exports never load the whole chat into memory and never
+        silently cap at an arbitrary limit."""
+        last_ts, last_id = "", 0
+        cutoff = None
+        if hours is not None:
+            cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+        while True:
+            query = "SELECT * FROM messages WHERE (timestamp, id) > (?, ?)"
+            params: list[Any] = [last_ts, last_id]
+            if chat_id is not None:
+                query += " AND chat_id = ?"
+                params.append(chat_id)
+            if cutoff is not None:
+                query += " AND timestamp >= ?"
+                params.append(cutoff)
+            query += " ORDER BY timestamp, id LIMIT ?"
+            params.append(batch)
+            rows = self.conn.execute(query, params).fetchall()
+            if not rows:
+                return
+            for row in rows:
+                yield dict(row)
+            last_ts, last_id = rows[-1]["timestamp"], rows[-1]["id"]
 
     def get_today(
         self,

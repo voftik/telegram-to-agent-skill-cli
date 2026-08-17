@@ -5,7 +5,6 @@ import click
 from ..console import console
 from ..db import MessageDB
 from ._chat import resolve_chat_id_or_print
-from ._output import default_structured_format, dump_structured, error_payload
 
 
 @click.group("data")
@@ -19,47 +18,54 @@ def data_group():
 @click.option("-o", "--output", "output_file", help="Output file path")
 @click.option("--hours", type=int, help="Only export last N hours")
 def export(chat: str, fmt: str, output_file: str | None, hours: int | None):
-    """Export messages from CHAT to text, JSON, or YAML."""
+    """Export ALL messages of CHAT to text, JSON, or YAML.
+
+    The payload streams straight to stdout (or the file) without Rich
+    wrapping/markup, so `tg export … > file` is always parseable (#35);
+    diagnostics go to stderr. No silent row caps — the export paginates
+    through the entire range.
+    """
+    import json as _json
+    import sys as _sys
+
+    import yaml as _yaml
+
     with MessageDB() as db:
         chat_id = resolve_chat_id_or_print(db, chat)
         if chat_id is None:
-            return
+            raise SystemExit(1)
 
-        if hours:
-            msgs = db.get_recent(chat_id=chat_id, hours=hours, limit=100000)
-        else:
-            msgs = db.get_recent(chat_id=chat_id, hours=None, limit=100000)
+        out = open(output_file, "w", encoding="utf-8") if output_file else _sys.stdout
+        count = 0
+        try:
+            if fmt == "json":
+                out.write("[\n")
+            for msg in db.iter_messages(chat_id=chat_id, hours=hours):
+                count += 1
+                if fmt == "text":
+                    ts = (msg.get("timestamp") or "")[:19]
+                    sender = msg.get("sender_name") or "Unknown"
+                    out.write(f"[{ts}] {sender}: {msg.get('content') or ''}\n")
+                elif fmt == "json":
+                    if count > 1:
+                        out.write(",\n")
+                    out.write(_json.dumps(msg, ensure_ascii=False, default=str))
+                else:
+                    out.write(_yaml.safe_dump([msg], allow_unicode=True, width=10**9))
+            if fmt == "json":
+                out.write("\n]\n")
+        finally:
+            if output_file:
+                out.close()
+            else:
+                out.flush()
 
-    if not msgs:
-        structured_fmt = (
-            fmt
-            if fmt in {"json", "yaml"}
-            else default_structured_format(as_json=False, as_yaml=False)
-        )
-        if structured_fmt in {"json", "yaml"} and output_file is None:
-            payload = error_payload("no_messages", f"No messages found for '{chat}'.")
-            click.echo(dump_structured(payload, fmt=structured_fmt))
-            raise SystemExit(1) from None
+    if count == 0:
         console.print(f"[yellow]No messages found for '{chat}'.[/yellow]")
-        return
-
-    if fmt in {"json", "yaml"}:
-        content = dump_structured(msgs, fmt=fmt)
-    else:
-        lines = []
-        for msg in msgs:
-            ts = (msg.get("timestamp") or "")[:19]
-            sender = msg.get("sender_name") or "Unknown"
-            text = msg.get("content") or ""
-            lines.append(f"[{ts}] {sender}: {text}")
-        content = "\n".join(lines)
-
-    if output_file:
-        with open(output_file, "w", encoding="utf-8") as f:
-            f.write(content)
-        console.print(f"[green]✓[/green] Exported {len(msgs)} messages to {output_file}")
-    else:
-        console.print(content)
+        raise SystemExit(1)
+    # console targets stderr — safe alongside a stdout payload
+    where = output_file or "stdout"
+    console.print(f"[green]✓[/green] Exported {count} messages to {where}")
 
 
 @data_group.command("purge")
