@@ -194,8 +194,11 @@ def uninstall_autostart() -> None:
     if sys.platform == "darwin":
         path = launch_agent_path()
         if path.exists():
-            subprocess.run(["launchctl", "unload", "-w", str(path)], capture_output=True)
+            # Order matters when the worker uninstalls ITSELF: launchctl
+            # terminates the job (this very process), so the plist must be
+            # gone before that — otherwise it lingers forever.
             path.unlink(missing_ok=True)
+            subprocess.run(["launchctl", "remove", LABEL], capture_output=True)
     elif sys.platform.startswith("linux"):
         path = systemd_unit_path()
         if path.exists():

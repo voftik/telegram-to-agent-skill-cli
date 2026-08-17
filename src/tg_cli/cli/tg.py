@@ -534,12 +534,16 @@ def tg_whoami(as_json: bool, as_yaml: bool):
 def tg_status(as_json: bool, as_yaml: bool):
     """Show Telegram authentication status (non-interactive, never prompts)."""
     from ..client import check_auth
+    from ..update import update_status
 
     info = asyncio.run(check_auth())
 
     payload = {
         "authenticated": info["authenticated"],
         "reachable": info["reachable"],
+        # status is already a network probe — the right place to refresh
+        # the update cache; agents read update.update_available from here.
+        "update": update_status(refresh=info["reachable"]),
     }
     if info["error"]:
         payload["error"] = info["error"]

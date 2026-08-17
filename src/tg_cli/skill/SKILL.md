@@ -49,6 +49,9 @@ local and cheap; only sync and file download touch Telegram.
    retry later; never retry in a loop.
 8. **Privacy:** chat content is personal data. Quote only what the task
    needs; do not copy large excerpts into artifacts or commit them to git.
+9. **Maintenance:** when `tg status --yaml` reports
+   `update.update_available: true`, tell the user a new version exists and
+   offer to run `tg update`. Never run the update unasked.
 
 ## Command reference (all support --yaml)
 
