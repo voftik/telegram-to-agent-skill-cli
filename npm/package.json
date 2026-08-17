@@ -1,0 +1,14 @@
+{
+  "name": "telegram-to-agent-skill-cli",
+  "version": "0.0.0",
+  "description": "Launcher for the tg Telegram CLI + agent skill for Claude Code / Codex (Python package installed via uv)",
+  "bin": {
+    "telegram-to-agent-skill-cli": "bin/run.mjs",
+    "tg-agent-skill": "bin/run.mjs"
+  },
+  "files": ["bin/run.mjs"],
+  "engines": { "node": ">=18" },
+  "keywords": ["telegram", "claude-code", "codex", "agent", "skill", "cli", "telethon"],
+  "license": "Apache-2.0",
+  "repository": "github:voftik/telegram-to-agent-skill-cli"
+}
