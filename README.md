@@ -110,6 +110,27 @@ flowchart LR
 - Untrusted attachments face budgets: size checks before download, zip-bomb guards, streaming hashes, private file modes.
 - Use your own `api_id` and `api_hash`. The tool syncs politely (delays, jitter, FloodWait handling) and reads locally.
 
+## How it compares
+
+Honest comparison with the other ways to give an agent your Telegram (state of the ecosystem, August 2026):
+
+| | **tg (this project)** | Telegram MCP servers¹ | Upstream tg-cli | Telegram Desktop export |
+| --- | --- | --- | --- | --- |
+| Works in any CLI agent | yes, one install | per-agent MCP config | yes | manual copy-paste |
+| Session context cost | zero until used | tool schemas eat tokens in every session | zero | zero |
+| Search over all history | FTS5, milliseconds, offline | live API calls, rate-limited | `LIKE` scan | none (static files) |
+| Attachments as readable text | pdf/docx/xlsx/pptx extracted | download at best | not stored | raw files |
+| Google Docs links | ready-to-fetch export URLs | no | no | no |
+| Thread reconstruction | yes, incl. t.me links | partial | no | no |
+| Parallel agent sessions | any number of readers | session-file conflicts² | single user | n/a |
+| Send safety | dry-run default, `--confirm`, journal | varies; several send immediately | sends immediately | n/a |
+| Sync integrity | gap-safe cursors, `tg backfill` | n/a (live reads) | best effort | one-off snapshot |
+| Data freshness | incremental sync in seconds | always live | incremental | frozen at export |
+| Install and update | `npx`/`uv` one-liner, `tg update` | manual server config | pip | built into the app |
+
+¹ chigwell/telegram-mcp, chaindead/telegram-mcp, overpod/mcp-telegram and similar. They fit well when your agent lives in claude.ai web where a CLI is unavailable, and chaindead's drafts-only design is a genuinely safe touch.
+² Telethon/GramJS allow one process per session file; MCP servers spawn per agent session and collide (the shared-daemon setups that avoid this need extra configuration).
+
 ## What the fork adds over upstream tg-cli
 
 | Area | [upstream](https://github.com/jackwener/tg-cli) | this fork |
