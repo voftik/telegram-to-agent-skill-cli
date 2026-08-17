@@ -8,14 +8,16 @@ note.
 
 1. **Fix the list and the window.** If the user named chats — use them;
    "мои рабочие чаты" without a list → propose candidates from `tg chats`
-   (top by recent activity: `tg stats --yaml`) and confirm. Default window:
+   (`tg stats --yaml` shows *all-time* volumes; for recent activity check
+   `tg brief CHAT` or `tg top -c CHAT --hours 48`) and confirm. Default window:
    24–48h for chats, 7 days for channels; confirm if unclear.
 2. **Sync each:** `tg sync "CHAT"` in sequence (never in parallel — one
    Telegram session).
 3. **Collect per chat:** `tg recent -c CHAT --hours <H> -n 200 --yaml`.
-   Cap: if a chat has more than ~200 messages in the window, take the top
-   threads (`tg top -c CHAT --hours <H>`, then `tg thread` on hot spots)
-   instead of everything.
+   Cap: if a chat has more than ~200 messages in the window, don't pull
+   everything: `tg top -c CHAT --hours <H>` shows *who* is most active
+   (senders, no msg_id), then locate the hot discussions via
+   `tg search "тема*" -c CHAT` and unroll them with `tg thread --msg-id`.
 4. **Enrich:** `tg links CHAT --hours <H>` — a shared doc is often the real
    payload; fetch gdoc/gsheet `fetch_url` when a link is central to the
    discussion.

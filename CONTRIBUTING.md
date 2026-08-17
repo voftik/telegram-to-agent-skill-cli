@@ -3,9 +3,9 @@
 ## Development Setup
 
 ```bash
-git clone git@github.com:jackwener/tg-cli.git
-cd tg-cli
-uv sync --extra dev
+git clone https://github.com/voftik/telegram-to-agent-skill-cli.git
+cd telegram-to-agent-skill-cli
+uv sync --group dev
 ```
 
 ## Local Checks

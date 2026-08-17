@@ -54,7 +54,7 @@ local and cheap; only sync and file download touch Telegram.
 
 | Task | Command |
 | --- | --- |
-| Resolve chat name | `tg chats --yaml` (or `tg search "часть имени"`) |
+| Resolve chat name | `tg chats --yaml` and match by name (search only finds message *content*) |
 | Chat passport (size, activity, files, links) | `tg brief CHAT` |
 | Incremental sync of one chat | `tg sync "CHAT"` |
 | Recent messages | `tg recent -c CHAT --hours 48 -n 200` |
