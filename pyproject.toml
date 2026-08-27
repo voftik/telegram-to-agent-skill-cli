@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "telegram-to-agent-skill-cli"
-version = "0.7.0"
+version = "0.8.0"
 description = "Telegram context for coding agents: local sync, FTS5 search, attachments, links, threads — a tg-cli fork with an agent skill"
 readme = "README.md"
 license = { file = "LICENSE" }

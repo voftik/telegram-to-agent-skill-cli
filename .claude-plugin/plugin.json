@@ -1,7 +1,7 @@
 {
   "name": "telegram-context",
   "description": "Your Telegram chats as agent context: search, summaries, threads, files, links. Wraps the tg CLI (install: uv tool install telegram-to-agent-skill-cli && tg setup).",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "author": { "name": "voftik", "url": "https://github.com/voftik" },
   "homepage": "https://github.com/voftik/telegram-to-agent-skill-cli",
   "license": "Apache-2.0",
