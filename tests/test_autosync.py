@@ -78,6 +78,17 @@ class TestWorker:
         finally:
             bs.clear_marker()
 
+    def test_run_fails_when_enumeration_fails(self, monkeypatch):
+        from tg_cli.cli import tg as tg_cli_mod
+
+        async def _bad_pass(**kwargs):
+            return {"enumerated": False, "error": "boom", "total": 0}
+
+        monkeypatch.setattr(tg_cli_mod, "sync_all_dialogs", _bad_pass)
+        result = CliRunner().invoke(cli, ["autosync", "run"])
+        assert result.exit_code == 1
+        assert "incomplete" in result.output
+
     def test_status_not_armed(self, monkeypatch):
         monkeypatch.setattr(autosync, "schedule_installed", lambda: False)
         result = CliRunner().invoke(cli, ["autosync", "status", "--json"])

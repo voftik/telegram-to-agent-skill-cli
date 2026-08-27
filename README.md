@@ -71,7 +71,7 @@ Claude Desktop, Perplexity and ChatGPT (chat mode) cannot run a CLI, but they ca
 tg connect
 ```
 
-It detects the apps, writes their configs, self-tests the bridge and offers `tg autosync` (a scheduled refresh that keeps the index fresh). Details per app: [docs/DESKTOP-APPS.md](docs/DESKTOP-APPS.md).
+It detects the apps, writes their configs, self-tests the bridge and offers `tg autosync` (a scheduled refresh that keeps the index fresh). Details per app: [docs/DESKTOP-APPS.md](docs/DESKTOP-APPS.md) (in Russian).
 
 ## Why skill-first (and where the MCP bridge fits)
 

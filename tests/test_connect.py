@@ -137,14 +137,37 @@ class TestPathsAndDetection:
         assert hostapps.tg_binary_path() == tg_bin.resolve()
 
     def test_tg_binary_path_rejects_cache(self, monkeypatch, tmp_path):
-        cached = tmp_path / "cache" / "archive-v0" / "tg"
+        cached = tmp_path / ".cache" / "uv" / "archive-v0" / "bin" / "tg"
         cached.parent.mkdir(parents=True)
         cached.write_text("")
         monkeypatch.setattr(hostapps.shutil, "which", lambda _: str(cached))
         monkeypatch.setattr(hostapps, "uv_tool_tg_path", lambda: None)
-        monkeypatch.setattr(hostapps.sys, "argv", ["/not/tg-named"])
+        # argv[0] IS the cached binary (the uvx one-shot case): the
+        # fallback must reject it too, not silently wire the cache path.
+        monkeypatch.setattr(hostapps.sys, "argv", [str(cached)])
         with pytest.raises(RuntimeError, match="--command"):
             hostapps.tg_binary_path()
+
+    def test_mcpservers_non_object_refused(self, tmp_path, tg_bin):
+        cfg_path = tmp_path / "claude_desktop_config.json"
+        cfg_path.write_text(json.dumps({"mcpServers": ["broken"]}))
+        with pytest.raises(RuntimeError, match="mcpServers"):
+            hostapps.connect_claude_desktop(tg_bin, config_path=cfg_path)
+
+    def test_mcpservers_null_healed(self, tmp_path, tg_bin):
+        cfg_path = tmp_path / "claude_desktop_config.json"
+        cfg_path.write_text(json.dumps({"mcpServers": None}))
+        report = hostapps.connect_claude_desktop(tg_bin, config_path=cfg_path)
+        assert report["status"] == "added"
+        cfg = json.loads(cfg_path.read_text())
+        assert cfg["mcpServers"]["tg"]["args"] == ["mcp"]
+
+    def test_writers_preserve_file_mode(self, tmp_path, tg_bin):
+        cfg_path = tmp_path / "config.toml"
+        cfg_path.write_text('model = "o5"\n')
+        cfg_path.chmod(0o600)
+        hostapps.connect_codex(tg_bin, config_path=cfg_path)
+        assert (cfg_path.stat().st_mode & 0o777) == 0o600
 
     def test_detect_apps_shape(self, monkeypatch, tmp_path):
         monkeypatch.setattr(

@@ -217,6 +217,11 @@ def uninstall_schedule() -> None:
             subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
 
 
+def schedule_supported() -> bool:
+    """Platforms where install_schedule() can actually arm something."""
+    return sys.platform == "darwin" or sys.platform.startswith("linux")
+
+
 def schedule_installed() -> bool:
     if sys.platform == "darwin":
         return launch_agent_path().exists()

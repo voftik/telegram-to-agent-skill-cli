@@ -104,13 +104,32 @@ class TestRobustness:
         # The same process still answers the next request.
         assert json.loads(handle_message(rpc("ping")))["result"] == {}
 
-    def test_batch_rejected(self):
-        resp = json.loads(handle_message("[]"))
-        assert resp["error"]["code"] == -32600
-
     def test_unknown_tool(self):
         raw = handle_message(rpc("tools/call", {"name": "tg_nuke", "arguments": {}}))
         assert json.loads(raw)["error"]["code"] == -32602
+
+    def test_unknown_tool_notification_is_silent(self):
+        assert (
+            handle_message(rpc("tools/call", {"name": "tg_nuke"}, id_=None)) is None
+        )
+
+    def test_non_object_params_is_invalid_params(self):
+        raw = handle_message('{"jsonrpc":"2.0","id":7,"method":"tools/call","params":[1,2]}')
+        assert json.loads(raw)["error"]["code"] == -32602
+
+    def test_batch_of_requests(self):
+        batch = "[" + rpc("ping", id_=1) + "," + rpc("ping", id_=2) + "]"
+        resp = json.loads(handle_message(batch))
+        assert [r["id"] for r in resp] == [1, 2]
+        assert all(r["result"] == {} for r in resp)
+
+    def test_batch_of_notifications_is_silent(self):
+        batch = "[" + rpc("notifications/initialized", id_=None) + "]"
+        assert handle_message(batch) is None
+
+    def test_empty_batch_rejected(self):
+        resp = json.loads(handle_message("[]"))
+        assert resp["error"]["code"] == -32600
 
 
 class TestTools:
@@ -122,11 +141,12 @@ class TestTools:
         assert "platform" not in msg
         assert "Python" in msg["content"]
 
-    def test_search_regex(self, populated_db):
-        payload = payload_of(
-            call("tg_search", {"query": r"Message \d+", "regex": True, "limit": 5})
+    def test_search_regex_rejected(self, populated_db):
+        # ReDoS guard: the single-threaded bridge refuses regex mode.
+        text = error_text_of(
+            call("tg_search", {"query": r"(a+)+b", "regex": True})
         )
-        assert payload["count"] == 5
+        assert "FTS" in text
 
     def test_recent(self, populated_db):
         payload = payload_of(call("tg_recent", {"chat": "TestGroup", "hours": 48}))

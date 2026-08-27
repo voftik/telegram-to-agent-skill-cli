@@ -21,9 +21,9 @@ Built-in credentials by default and desktop chat apps as first-class hosts.
   ~/.codex/config.toml shared with ChatGPT desktop), prints the
   Perplexity walkthrough, and self-tests the bridge with a real MCP
   handshake before the user opens the app; new wizard step + `--apps`
-- Autosync: `tg autosync start` arms a scheduled `tg refresh` (launchd /
-  systemd user timer, default 15 min) that survives reboots and steps
-  aside while the bootstrap initial sync is pending
+- Autosync: `tg autosync start` arms a scheduled background refresh pass
+  (launchd / systemd user timer, default 15 min) that survives reboots
+  and steps aside while the bootstrap initial sync is pending
 - Docs: docs/DESKTOP-APPS.md guide, INSTALL.md rewritten for keyless
   setup, honest MCP section update in both READMEs
 - Dist: plugin metadata version now guarded against pyproject drift

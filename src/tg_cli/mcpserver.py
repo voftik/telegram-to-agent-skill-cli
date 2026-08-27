@@ -131,24 +131,19 @@ def _tool_search(args: dict) -> dict:
     query = args.get("query")
     if not query or not isinstance(query, str):
         raise _ToolError("'query' is required and must be a string.")
+    if args.get("regex"):
+        # Python re has no backtracking bound: a hostile pattern over
+        # hostile stored content could wedge this single-threaded server.
+        raise _ToolError(
+            "Regex search is not available over the bridge. Use FTS syntax:"
+            ' word* prefixes, "exact phrases", OR.'
+        )
     limit = _clamp(args.get("limit"), 50, MAX_LIMIT)
     hours = _clamp(args.get("hours"), DEFAULT_HOURS, 24 * 365 * 20)
     with _open_db() as db:
         _require_nonempty(db)
         chat_id = _resolve_chat(db, args["chat"]) if args.get("chat") else None
         sender = args.get("sender") or None
-        if args.get("regex"):
-            try:
-                res = db.search_regex(
-                    query, chat_id=chat_id, sender=sender, hours=hours, limit=limit
-                )
-            except Exception as e:
-                raise _ToolError(f"Invalid regex: {e}") from None
-            return {
-                "count": len(res["results"]),
-                "messages": [_slim(r) for r in res["results"]],
-                "truncated": res["truncated"],
-            }
         rows = db.search(query, chat_id=chat_id, sender=sender, hours=hours, limit=limit)
         return {
             "count": len(rows),
@@ -272,7 +267,6 @@ TOOLS: dict[str, tuple[dict, Callable[[dict], dict]]] = {
                     "sender": {"type": "string"},
                     "hours": {"type": "integer", "default": DEFAULT_HOURS},
                     "limit": {"type": "integer", "default": 50, "maximum": MAX_LIMIT},
-                    "regex": {"type": "boolean", "default": False},
                 },
                 required=["query"],
             ),
@@ -422,18 +416,29 @@ def _dispatch(obj: dict) -> dict | None:
         return None
     if not isinstance(method, str):
         return None if is_notification else _rpc_error(id_, -32600, "Invalid Request")
+    params = obj.get("params") or {}
+    if not isinstance(params, dict):
+        return (
+            None
+            if is_notification
+            else _rpc_error(id_, -32602, "params must be an object")
+        )
 
     if method == "initialize":
-        result = _handle_initialize(obj.get("params") or {})
+        result = _handle_initialize(params)
     elif method == "ping":
         result = {}
     elif method == "tools/list":
         result = {"tools": [spec for spec, _ in TOOLS.values()]}
     elif method == "tools/call":
         try:
-            result = _handle_tools_call(obj.get("params") or {})
+            result = _handle_tools_call(params)
         except KeyError as e:
-            return _rpc_error(id_, -32602, f"Unknown tool: {e.args[0]}")
+            return (
+                None
+                if is_notification
+                else _rpc_error(id_, -32602, f"Unknown tool: {e.args[0]}")
+            )
     elif method == "resources/list":
         result = {"resources": []}
     elif method == "prompts/list":
@@ -451,15 +456,29 @@ def handle_message(line: str) -> str | None:
     except json.JSONDecodeError:
         return _serialize(_rpc_error(None, -32700, "Parse error"))
     if isinstance(obj, list):
-        return _serialize(_rpc_error(None, -32600, "Batch requests are not supported"))
+        # JSON-RPC batch (required by the 2025-03-26 revision).
+        if not obj:
+            return _serialize(_rpc_error(None, -32600, "Invalid Request"))
+        responses = [r for r in (_safe_dispatch(item) for item in obj) if r is not None]
+        if not responses:
+            return None  # all notifications
+        return json.dumps(responses, ensure_ascii=False, separators=(",", ":"))
     if not isinstance(obj, dict):
         return _serialize(_rpc_error(None, -32600, "Invalid Request"))
+    resp = _safe_dispatch(obj)
+    return _serialize(resp) if resp is not None else None
+
+
+def _safe_dispatch(obj) -> dict | None:
+    if not isinstance(obj, dict):
+        return _rpc_error(None, -32600, "Invalid Request")
     try:
-        resp = _dispatch(obj)
+        return _dispatch(obj)
     except Exception as e:  # noqa: BLE001 - the loop must survive anything
         log.exception("dispatch failed")
-        resp = _rpc_error(obj.get("id"), -32603, f"Internal error: {type(e).__name__}")
-    return _serialize(resp) if resp is not None else None
+        if "id" not in obj:
+            return None  # never answer a notification, even a broken one
+        return _rpc_error(obj.get("id"), -32603, f"Internal error: {type(e).__name__}")
 
 
 def _serialize(resp: dict) -> str:
@@ -470,6 +489,12 @@ def _serialize(resp: dict) -> str:
 def serve(stdin=None, stdout=None) -> int:
     """Blocking stdio loop. EOF on stdin means the host is done: exit 0."""
     logging.basicConfig(stream=sys.stderr, level=logging.WARNING)
+    # MCP mandates UTF-8 on the wire; Windows pipes default to the ANSI
+    # code page, which would mangle Cyrillic content in both directions.
+    if stdin is None and hasattr(sys.stdin, "reconfigure"):
+        sys.stdin.reconfigure(encoding="utf-8", errors="replace")
+    if stdout is None and hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
     inp = stdin if stdin is not None else sys.stdin
     out = stdout if stdout is not None else sys.stdout
     try:

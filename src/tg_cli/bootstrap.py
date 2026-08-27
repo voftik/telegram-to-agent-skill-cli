@@ -53,11 +53,36 @@ def clear_marker() -> None:
 
 
 def tg_executable() -> str:
-    """Absolute path to the `tg` entry point (launchd has a bare PATH)."""
+    """Absolute path to the `tg` entry point (launchd has a bare PATH).
+
+    Prefers a durable path: under one-shot `uvx` runs argv[0] lives in
+    uv's ephemeral cache, and a LaunchAgent pointing there dies on the
+    next `uv cache clean`.
+    """
+    from .hostapps import _is_transient
+
     candidate = Path(sys.argv[0]).resolve()
-    if candidate.name in ("tg", "tg.exe") and candidate.exists():
+    if (
+        candidate.name in ("tg", "tg.exe")
+        and candidate.exists()
+        and not _is_transient(candidate)
+    ):
         return str(candidate)
-    return shutil.which("tg") or "tg"
+    which = shutil.which("tg")
+    if which and not _is_transient(Path(which).resolve()):
+        return which
+    from .hostapps import uv_tool_tg_path
+
+    stable = uv_tool_tg_path()
+    if stable is not None:
+        return str(stable)
+    # Last resort: a transient path still beats a bare "tg" that launchd
+    # cannot resolve — bootstrap keeps working for the current session.
+    if which:
+        return which
+    if candidate.exists():
+        return str(candidate)
+    return "tg"
 
 
 def launch_agent_path() -> Path:

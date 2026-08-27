@@ -4,8 +4,9 @@
 sdist: full source snapshot — canonical skill with references, installer,
 docs, bilingual README. Also: no stale-upstream references (kabi-tg-cli),
 and every relative link in skill/SKILL.md resolves inside the archive.
-The wheel ships runtime code only; the supported skill delivery is a
-repo clone (or unpacked sdist) + install.sh — see docs/INSTALL.md.
+The wheel carries the CLI and the skill (byte-identical with the sdist
+copy) so `tg skill install` works for plain PyPI installs — see
+docs/INSTALL.md. Plugin metadata versions must match pyproject.
 """
 
 from __future__ import annotations

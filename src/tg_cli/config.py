@@ -95,7 +95,13 @@ def get_api_credentials() -> tuple[int, str]:
     raw_id = os.environ.get("TG_API_ID", "")
     raw_hash = os.environ.get("TG_API_HASH", "")
     if raw_id and raw_hash:
-        return int(raw_id), raw_hash
+        try:
+            return int(raw_id), raw_hash
+        except ValueError:
+            raise RuntimeError(
+                f"TG_API_ID must be numeric, got {raw_id!r};"
+                " fix or remove it from the data-dir .env"
+            ) from None
     if raw_id or raw_hash:
         raise RuntimeError(
             "TG_API_ID and TG_API_HASH must be set together; "

@@ -545,6 +545,8 @@ def tg_status(as_json: bool, as_yaml: bool):
         # the update cache; agents read update.update_available from here.
         "update": update_status(refresh=info["reachable"]),
     }
+    if info.get("config_error"):
+        payload["config_error"] = True
     if info["error"]:
         payload["error"] = info["error"]
     if info["authenticated"]:
@@ -561,6 +563,8 @@ def tg_status(as_json: bool, as_yaml: bool):
         console.print(f"[green]✓[/green] Authenticated as [bold]{name or info['id']}[/bold]")
         if info["username"]:
             console.print(f"[dim]@{info['username']}[/dim]")
+    elif info.get("config_error"):
+        console.print(f"[red]⚠ Configuration error: {info['error']}[/red]")
     elif not info["reachable"]:
         console.print(f"[yellow]⚠ Network unreachable: {info['error']}[/yellow]")
     else:
@@ -820,10 +824,20 @@ def tg_autosync_run():
     except Exception as e:
         console.print(f"autosync pass failed, next tick retries: {e}")
         raise SystemExit(1) from None
+    # A pass proves nothing when enumeration failed — do not report success.
+    if not report.get("enumerated"):
+        console.print(
+            f"autosync pass incomplete, next tick retries: {report.get('error')}"
+        )
+        raise SystemExit(1)
+    failed = report.get("failed", 0)
+    suffix = f", failed: {failed}" if failed else ""
     console.print(
         f"autosync pass: {report.get('total', 0)} chats,"
-        f" +{report.get('new_messages', 0)} messages"
+        f" +{report.get('new_messages', 0)} messages{suffix}"
     )
+    if failed:
+        raise SystemExit(1)
 
 
 @tg_autosync.command("status")

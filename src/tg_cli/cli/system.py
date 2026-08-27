@@ -295,6 +295,12 @@ def _offer_autosync(interactive: bool) -> None:
     if asy.schedule_installed():
         console.print("[dim]Autosync already armed (tg autosync status).[/dim]")
         return
+    if not asy.schedule_supported():
+        console.print(
+            "[dim]Keep the index fresh with a scheduled `tg autosync run`"
+            " (Task Scheduler on Windows); see docs/DESKTOP-APPS.md.[/dim]"
+        )
+        return
     if not interactive:
         console.print("[dim]Keep the index fresh for apps: tg autosync start[/dim]")
         return
@@ -307,7 +313,12 @@ def _offer_autosync(interactive: bool) -> None:
         from .tg import tg_autosync_start
 
         ctx = click.get_current_context()
-        ctx.invoke(tg_autosync_start, interval=None, limit=2000, delay=1.0)
+        try:
+            ctx.invoke(tg_autosync_start, interval=None, limit=2000, delay=1.0)
+        except SystemExit:
+            # A failed schedule install must not abort the surrounding
+            # wizard or connect flow; the command already explained why.
+            console.print("[dim]Later: tg autosync start[/dim]")
     else:
         console.print("[dim]Later: tg autosync start[/dim]")
 
@@ -533,7 +544,26 @@ def _step_credentials(
     has_hash = env_has_hash or proc_has_hash
 
     if has_id and has_hash and api_id is None and api_hash is None:
-        console.print("[green]✓[/green] Credentials already configured")
+        if env_has_id and env_has_hash:
+            console.print("[green]✓[/green] Credentials already configured")
+            return "existing"
+        # Keys live only in the process environment (shell export or
+        # TG_ENV_FILE). Scheduled workers (autosync, bootstrap) start with
+        # a scrubbed environment and would fall back to the built-in keys.
+        console.print(
+            "[yellow]Credentials come from the shell environment, not from"
+            f" {env_path}; background workers would not see them.[/yellow]"
+        )
+        raw_id = _os.environ.get("TG_API_ID", "")
+        raw_hash = _os.environ.get("TG_API_HASH", "")
+        if (
+            not yes
+            and raw_id.isdigit()
+            and re.fullmatch(_HASH_RE, raw_hash)
+            and click.confirm("Persist them into the data dir .env?", default=True)
+        ):
+            _write_env_pair(env_path, int(raw_id), raw_hash)
+            console.print(f"[green]✓[/green] Credentials written to {env_path}")
         return "existing"
     if has_id != has_hash and api_id is None and api_hash is None:
         console.print(
@@ -553,6 +583,9 @@ def _step_credentials(
             raise SystemExit(1)
         # Interactive: prompt only for the missing half below.
 
+    if api_hash is not None:
+        api_hash = api_hash.strip()
+
     if yes:
         if api_id is None and api_hash is None:
             console.print(
@@ -564,6 +597,12 @@ def _step_credentials(
             console.print("[red]api_hash must be 32 lowercase hex characters[/red]")
             raise SystemExit(1)
     else:
+        def _builtin() -> None:
+            console.print(
+                "[green]✓[/green] Using built-in keys"
+                " (rerun tg setup anytime to switch to your own)"
+            )
+
         if api_id is None:
             raw = click.prompt(
                 "api_id (press Enter to use built-in keys)",
@@ -578,26 +617,39 @@ def _step_credentials(
                     show_default=False,
                 ).strip()
             if not raw:
-                console.print(
-                    "[green]✓[/green] Using built-in keys"
-                    " (rerun tg setup anytime to switch to your own)"
-                )
+                _builtin()
                 return "builtin"
             api_id = int(raw)
+        hash_prompt = "api_hash (32 hex characters, or Enter to use built-in keys)"
         if api_hash is None:
-            api_hash = click.prompt("api_hash (32 hex characters from the same page)")
+            api_hash = click.prompt(hash_prompt, default="", show_default=False).strip()
         while not re.fullmatch(_HASH_RE, api_hash or ""):
+            if not api_hash:
+                # The my.telegram.org attempt failed midway? Enter falls
+                # back to built-ins instead of trapping the user here.
+                _builtin()
+                return "builtin"
             console.print(
                 "[yellow]api_hash must be 32 lowercase hex characters, try again[/yellow]"
             )
-            api_hash = click.prompt("api_hash (32 hex characters from the same page)")
+            api_hash = click.prompt(hash_prompt, default="", show_default=False).strip()
 
+    shadowed = (
+        proc_has_id and not env_has_id and _os.environ.get("TG_API_ID") != str(api_id)
+    ) or (
+        proc_has_hash and not env_has_hash and _os.environ.get("TG_API_HASH") != api_hash
+    )
     _write_env_pair(env_path, api_id, api_hash)
     # .env was already loaded at import time — export the new pair so the
     # sign-in step of THIS wizard run uses it, not the built-in keys.
     _os.environ["TG_API_ID"] = str(api_id)
     _os.environ["TG_API_HASH"] = api_hash
     console.print(f"[green]✓[/green] Credentials written to {env_path}")
+    if shadowed:
+        console.print(
+            "[yellow]A shell export or TG_ENV_FILE holds different keys and"
+            " will shadow the .env in future runs; update or remove it.[/yellow]"
+        )
     return "custom"
 
 
@@ -657,6 +709,9 @@ def setup_cmd(
         info = asyncio.run(check_auth())
         if info["authenticated"]:
             console.print(f"[green]✓[/green] Signed in as id {info.get('id')}")
+        elif info.get("config_error"):
+            console.print(f"[red]✗ Configuration error: {info['error']}[/red]")
+            raise SystemExit(1)
         elif not info["reachable"]:
             console.print("[yellow]⚠ Network unreachable, skipping sign-in[/yellow]")
         elif yes:
@@ -681,6 +736,7 @@ def setup_cmd(
             detected.append("codex")
         agents = ",".join(detected) or "claude"
     if agents != "none":
+        console.print("\n[bold]3. Agent skill[/bold]")
         agent_set = {a.strip() for a in agents.split(",") if a.strip()}
         try:
             report = skillpkg.install_skill(force=False)
@@ -695,7 +751,7 @@ def setup_cmd(
             console.print(f"  [dim]{agent}: {state}[/dim]")
 
     # 4. Desktop apps ------------------------------------------------------
-    app_results = _step_desktop_apps(apps, yes)
+    app_results, offer_autosync = _step_desktop_apps(apps, yes)
 
     # 5. Initial sync ------------------------------------------------------
     if not skip_bootstrap and not yes:
@@ -711,6 +767,12 @@ def setup_cmd(
             ctx.invoke(tg_bootstrap_start, delay=2.0, limit=5000)
         else:
             console.print("[dim]Later: tg bootstrap start[/dim]")
+
+    # Autosync is offered AFTER bootstrap on purpose: with the marker
+    # already written, the first autosync tick steps aside instead of
+    # racing the initial sync for the single Telethon session.
+    if offer_autosync:
+        _offer_autosync(interactive=not yes)
 
     # 6. Summary -----------------------------------------------------------
     from ..update import current_version, detect_install
@@ -728,17 +790,25 @@ def setup_cmd(
     table.add_row("next", "tg chats · tg brief <chat> · tg search '…'")
     console.print(table)
 
+    # Explicitly requested apps that failed to wire must be visible to
+    # automation: full report above, non-zero exit here.
+    if apps not in (None, "none") and any(
+        state == "failed" for state in app_results.values()
+    ):
+        raise SystemExit(1)
 
-def _step_desktop_apps(apps: str | None, yes: bool) -> dict[str, str]:
+
+def _step_desktop_apps(apps: str | None, yes: bool) -> tuple[dict[str, str], bool]:
     """Wizard step 4: wire desktop chat apps over the MCP bridge.
 
     apps=None means detect and ask (silently skipped under --yes);
     an explicit list connects without prompting; 'none' skips.
+    Returns (per-app results, whether to offer autosync after bootstrap).
     """
     if apps == "none" or (yes and apps is None):
-        return {}
+        return {}, False
 
-    from ..hostapps import detect_apps
+    from ..hostapps import detect_apps, tg_binary_path
 
     results: dict[str, str] = {}
     detected = detect_apps()
@@ -762,13 +832,23 @@ def _step_desktop_apps(apps: str | None, yes: bool) -> dict[str, str]:
         console.print(
             "\n[dim]4. Desktop apps: none detected. Later: tg connect[/dim]"
         )
-        return {}
+        return {}, False
 
     console.print(
         "\n[bold]4. Desktop apps[/bold] — tg can serve your Telegram index to"
         " desktop chat apps over MCP (read-only)."
     )
-    tg_path = _resolve_command_path(None)
+    try:
+        tg_path = tg_binary_path()
+    except RuntimeError as e:
+        # A sub-step must not kill the wizard: skip, keep steps 5-6 alive.
+        console.print(
+            f"[yellow]⚠ {e}[/yellow]\n"
+            "[dim]Skipping desktop apps. Later: tg connect --command"
+            " /abs/path/to/tg[/dim]"
+        )
+        return dict.fromkeys(wanted, "skipped"), False
+
     connected = False
     for app in wanted:
         _announce(app, detected[app]["config_path"])
@@ -779,6 +859,8 @@ def _step_desktop_apps(apps: str | None, yes: bool) -> dict[str, str]:
             report = _connect_one(app, tg_path)
         except RuntimeError as e:
             console.print(f"[red]✗ {app}: {e}[/red]")
+            if app == "claude-desktop" and "--force" in str(e):
+                console.print("[dim]Retry later: tg connect claude-desktop --force[/dim]")
             results[app] = "failed"
             continue
         _print_result(report)
@@ -793,5 +875,4 @@ def _step_desktop_apps(apps: str | None, yes: bool) -> dict[str, str]:
 
     if connected:
         _print_selftest(tg_path)
-        _offer_autosync(interactive=apps is None and not yes)
-    return results
+    return results, connected

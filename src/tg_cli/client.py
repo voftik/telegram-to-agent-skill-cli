@@ -138,7 +138,13 @@ async def check_auth() -> dict:
     try:
         api_id, api_hash = get_api_credentials()
     except RuntimeError as e:
-        return {"authenticated": False, "reachable": False, "error": str(e)}
+        # Not a network problem — callers must not suggest retrying.
+        return {
+            "authenticated": False,
+            "reachable": False,
+            "config_error": True,
+            "error": str(e),
+        }
     c = TelegramClient(
         get_session_path(),
         api_id,

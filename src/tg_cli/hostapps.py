@@ -40,7 +40,11 @@ def uv_tool_tg_path() -> Path | None:
 def _is_transient(path: Path) -> bool:
     """uvx runs from an ephemeral cache — never wire a GUI app to it."""
     parts = {p.lower() for p in path.parts}
-    return "cache" in parts or any(p.startswith("archive-") for p in path.parts)
+    if parts & {"cache", ".cache", "caches"}:
+        return True
+    return any(
+        p.startswith(("archive-", "environments-")) for p in (q.lower() for q in path.parts)
+    )
 
 
 def tg_binary_path() -> Path:
@@ -54,10 +58,19 @@ def tg_binary_path() -> Path:
     if stable is not None:
         return stable
     candidate = Path(sys.argv[0]).resolve()
-    if candidate.name in ("tg", "tg.exe") and candidate.exists():
+    # The transient check matters here too: under `uvx … tg setup` argv[0]
+    # IS the ephemeral cache binary, and `uv cache clean` would kill every
+    # config pointing at it.
+    if (
+        candidate.name in ("tg", "tg.exe")
+        and candidate.exists()
+        and not _is_transient(candidate)
+    ):
         return candidate
     raise RuntimeError(
-        "Could not locate the tg binary; pass --command with an absolute path"
+        "Could not locate a durable tg binary (one-shot uvx runs live in an"
+        " ephemeral cache). Install first: uv tool install"
+        " telegram-to-agent-skill-cli, or pass --command with an absolute path"
     )
 
 
@@ -118,6 +131,20 @@ def _backup(path: Path) -> str:
     return str(bak)
 
 
+def _carry_mode(original: Path, tmp: Path) -> None:
+    """tmp files are born under the umask (often 0644); replace() would
+    silently downgrade a 0600 config that may carry secrets. Carry the
+    original mode over, default new files to 0600."""
+    import os
+    import stat
+
+    try:
+        mode = stat.S_IMODE(original.stat().st_mode) if original.exists() else 0o600
+        os.chmod(tmp, mode)
+    except OSError:
+        pass
+
+
 def connect_claude_desktop(
     tg_path: Path, config_path: Path | None = None, force: bool = False
 ) -> dict:
@@ -143,7 +170,13 @@ def connect_claude_desktop(
         if not isinstance(cfg, dict):
             raise RuntimeError(f"{path} does not contain a JSON object")
 
-    servers = cfg.setdefault("mcpServers", {})
+    servers = cfg.get("mcpServers")
+    if servers is None:
+        servers = cfg["mcpServers"] = {}
+    elif not isinstance(servers, dict):
+        raise RuntimeError(
+            f"{path}: 'mcpServers' is not a JSON object; fix or remove it first"
+        )
     if servers.get("tg") == entry:
         return {"app": "claude-desktop", "status": "already", "config_path": str(path)}
 
@@ -154,6 +187,7 @@ def connect_claude_desktop(
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    _carry_mode(path, tmp)
     tmp.replace(path)
     return {
         "app": "claude-desktop",
@@ -212,6 +246,7 @@ def connect_codex(tg_path: Path, config_path: Path | None = None) -> dict:
     _verify_toml(body, path, backup)
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(body if body.endswith("\n") else body + "\n", encoding="utf-8")
+    _carry_mode(path, tmp)
     tmp.replace(path)
     return {"app": "codex", "status": status, "config_path": str(path), "backup": backup}
 
