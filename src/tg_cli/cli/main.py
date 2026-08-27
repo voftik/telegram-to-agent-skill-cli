@@ -48,3 +48,8 @@ def cli(verbose: bool):
 for group in (tg_group, query_group, data_group, system_group):
     for name, cmd in group.commands.items():
         cli.add_command(cmd, name)
+
+# `tg mcp` is registered as a group of its own (room for subcommands).
+from .mcp import mcp_group  # noqa: E402
+
+cli.add_command(mcp_group, "mcp")
