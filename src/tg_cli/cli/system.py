@@ -287,6 +287,31 @@ def _print_perplexity(tg_path: Path) -> None:
             pass
 
 
+def _offer_autosync(interactive: bool) -> None:
+    """After wiring a desktop app: the bridge only reads, so offer the
+    scheduled refresh that keeps the index fresh for it."""
+    from .. import autosync as asy
+
+    if asy.schedule_installed():
+        console.print("[dim]Autosync already armed (tg autosync status).[/dim]")
+        return
+    if not interactive:
+        console.print("[dim]Keep the index fresh for apps: tg autosync start[/dim]")
+        return
+    console.print(
+        "\nThe bridge reads the local index; a scheduled refresh keeps it fresh."
+    )
+    if click.confirm(
+        "Refresh the index automatically (tg autosync, every 15 min)?", default=True
+    ):
+        from .tg import tg_autosync_start
+
+        ctx = click.get_current_context()
+        ctx.invoke(tg_autosync_start, interval=None, limit=2000, delay=1.0)
+    else:
+        console.print("[dim]Later: tg autosync start[/dim]")
+
+
 def _restart_hint(app: str) -> None:
     hints = {
         "claude-desktop": "Fully restart Claude Desktop (Cmd+Q, reopen) to load it.",
@@ -346,6 +371,7 @@ def connect_group(ctx: click.Context, yes: bool, command_path: str | None):
         return
     if connected:
         _print_selftest(tg_path)
+        _offer_autosync(interactive=not yes)
 
 
 @connect_group.command("claude-desktop")
@@ -767,4 +793,5 @@ def _step_desktop_apps(apps: str | None, yes: bool) -> dict[str, str]:
 
     if connected:
         _print_selftest(tg_path)
+        _offer_autosync(interactive=apps is None and not yes)
     return results

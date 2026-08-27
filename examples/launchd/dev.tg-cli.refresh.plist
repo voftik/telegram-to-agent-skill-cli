@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+ "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Reference only: `tg autosync start` generates and loads this for you.
+  For a manual install, replace the two paths below, copy the file to
+  ~/Library/LaunchAgents/ and run: launchctl load -w <path>.
+  Credentials stay in the protected data-dir .env (0600) which the CLI
+  loads itself; do NOT inline TG_API_ID/TG_API_HASH here.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>dev.tg-cli.refresh</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/YOU/.local/bin/tg</string>
+        <string>autosync</string>
+        <string>run</string>
+    </array>
+    <key>RunAtLoad</key><true/>
+    <key>StartInterval</key><integer>900</integer>
+    <key>StandardOutPath</key><string>/Users/YOU/Library/Application Support/tg-cli/refresh.log</string>
+    <key>StandardErrorPath</key><string>/Users/YOU/Library/Application Support/tg-cli/refresh.log</string>
+</dict>
+</plist>

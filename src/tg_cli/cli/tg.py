@@ -759,6 +759,111 @@ def tg_bootstrap_stop():
     console.print("[green]✓[/green] Bootstrap disarmed.")
 
 
+@tg_group.group("autosync")
+def tg_autosync():
+    """Scheduled background refresh: keeps the local index fresh
+    (used by desktop chat apps through the read-only MCP bridge)."""
+
+
+@tg_autosync.command("start")
+@click.option(
+    "--interval",
+    type=click.IntRange(min=5),
+    default=None,
+    help="Minutes between refreshes (default: 15)",
+)
+@click.option(
+    "-n",
+    "--limit",
+    type=click.IntRange(min=1),
+    default=2000,
+    show_default=True,
+    help="Max messages per chat per pass",
+)
+@click.option("--delay", default=1.0, show_default=True, help="Seconds between chats")
+def tg_autosync_start(interval: int | None, limit: int, delay: float):
+    """Arm the schedule: refresh every N minutes, survives reboots."""
+    from .. import autosync as asy
+
+    interval = interval or asy.DEFAULT_INTERVAL_MIN
+    asy.write_state(interval, limit, delay)
+    try:
+        where = asy.install_schedule(interval)
+    except Exception as e:
+        asy.clear_state()
+        console.print(f"[red]Schedule install failed: {e}[/red]")
+        raise SystemExit(1) from None
+    console.print(f"[green]✓[/green] Autosync armed: {where}")
+    console.print(f"[dim]Log: {asy.log_path()} · stop: tg autosync stop[/dim]")
+
+
+@tg_autosync.command("run", hidden=True)
+def tg_autosync_run():
+    """Worker invoked by launchd/systemd. Not meant for humans."""
+    from .. import autosync as asy
+    from .. import bootstrap as bs
+
+    asy.trim_log()
+    if bs.read_marker() is not None:
+        # The initial sync owns the Telethon session; step aside quietly.
+        console.print("autosync: bootstrap pass still pending, skipping this tick")
+        return
+    state = asy.read_state() or {}
+    limit = int(state.get("limit", 2000))
+    delay = float(state.get("delay", 1.0))
+
+    async def _pass():
+        return await sync_all_dialogs(limit=limit, delay=delay)
+
+    try:
+        report = _run_async(_pass())
+    except Exception as e:
+        console.print(f"autosync pass failed, next tick retries: {e}")
+        raise SystemExit(1) from None
+    console.print(
+        f"autosync pass: {report.get('total', 0)} chats,"
+        f" +{report.get('new_messages', 0)} messages"
+    )
+
+
+@tg_autosync.command("status")
+@structured_output_options
+def tg_autosync_status(as_json: bool, as_yaml: bool):
+    """Is the scheduled refresh armed, and how fresh is the index?"""
+    from .. import autosync as asy
+    from ..db import MessageDB
+
+    state = asy.read_state()
+    with MessageDB() as db:
+        payload = {
+            "armed": asy.schedule_installed(),
+            "options": state or {},
+            "messages_indexed": db.count(),
+            "latest_message": db.get_latest_timestamp(),
+            "log": str(asy.log_path()),
+        }
+    if emit_structured(payload, as_json=as_json, as_yaml=as_yaml):
+        return
+    mark = "[green]armed[/green]" if payload["armed"] else "[dim]not armed[/dim]"
+    interval = (state or {}).get("interval_min")
+    every = f" (every {interval} min)" if interval else ""
+    console.print(f"autosync: {mark}{every}")
+    console.print(
+        f"index: {payload['messages_indexed']} messages,"
+        f" latest {payload['latest_message'] or 'never'}"
+    )
+
+
+@tg_autosync.command("stop")
+def tg_autosync_stop():
+    """Disarm the scheduled refresh."""
+    from .. import autosync as asy
+
+    asy.clear_state()
+    asy.uninstall_schedule()
+    console.print("[green]✓[/green] Autosync disarmed.")
+
+
 @tg_group.command("files")
 @click.argument("chat")
 @click.option("--download", is_flag=True, help="Download pending files and extract text")
