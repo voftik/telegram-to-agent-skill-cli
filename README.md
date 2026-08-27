@@ -26,7 +26,7 @@ The `tg` CLI signs in as you (MTProto via [Telethon](https://github.com/LonamiWe
 
 ## Install
 
-Pick any of the three. Each one ends in the interactive setup wizard, which collects API credentials, signs you in, installs the agent skill and offers the initial sync.
+Pick any of the three. Each one ends in the interactive setup wizard: sign-in, agent skill, desktop apps, initial sync. No API keys needed: press Enter and the built-in Telegram Desktop keys are used (your own from my.telegram.org stay recommended for heavy syncing).
 
 ```bash
 # with uv (recommended)
@@ -63,11 +63,21 @@ tg update --check  # just report; agents read update.update_available from `tg s
 
 The CLI never phones home on its own in data commands: the passive version hint reads a local cache and prints to stderr only in interactive sessions. Set `TG_UPDATE_CHECK=0` to silence it.
 
-## Why skill + CLI, not an MCP server
+## Desktop chat apps
 
-- **Zero context tax.** MCP tool schemas eat thousands of tokens in every session. A skill loads on demand; the CLI costs nothing until used.
+Claude Desktop, Perplexity and ChatGPT (chat mode) cannot run a CLI, but they can run local MCP servers. One command wires them to the same local index through `tg mcp`, a read-only bridge that never touches the Telegram session:
+
+```bash
+tg connect
+```
+
+It detects the apps, writes their configs, self-tests the bridge and offers `tg autosync` (a scheduled refresh that keeps the index fresh). Details per app: [docs/DESKTOP-APPS.md](docs/DESKTOP-APPS.md).
+
+## Why skill-first (and where the MCP bridge fits)
+
+- **Zero context tax.** MCP tool schemas eat tokens in every session. A skill loads on demand; the CLI costs nothing until used. Coding agents (Claude Code, Codex) get the full skill + CLI.
 - **One integration, every agent.** The same `tg` commands work in Claude Code, Codex, and anything else with a shell.
-- **No session juggling.** MCP servers spawn per agent session and fight over the Telethon session file. Here one sync process writes and any number of agent sessions read.
+- **No session juggling.** Sync is owned by one CLI process on the host; any number of agent sessions read the SQLite index. The bundled `tg mcp` bridge follows the same rule: it is a read-only adapter for hosts without a shell, six small tools, no Telegram session, no sends.
 
 ## How it works
 
@@ -128,7 +138,7 @@ Honest comparison with the other ways to give an agent your Telegram (state of t
 | Data freshness | incremental sync in seconds | always live | incremental | frozen at export |
 | Install and update | `npx`/`uv` one-liner, `tg update` | manual server config | pip | built into the app |
 
-¹ chigwell/telegram-mcp, chaindead/telegram-mcp, overpod/mcp-telegram and similar. They fit well when your agent lives in claude.ai web where a CLI is unavailable, and chaindead's drafts-only design is a genuinely safe touch.
+¹ chigwell/telegram-mcp, chaindead/telegram-mcp, overpod/mcp-telegram and similar. They still fit when your agent lives in claude.ai web, which cannot spawn local processes at all; chaindead's drafts-only design is a genuinely safe touch. Desktop hosts (Claude Desktop, Perplexity, ChatGPT desktop) are covered by the bundled read-only `tg mcp` bridge instead.
 ² Telethon/GramJS allow one process per session file; MCP servers spawn per agent session and collide (the shared-daemon setups that avoid this need extra configuration).
 
 ## What the fork adds over upstream tg-cli
@@ -143,7 +153,7 @@ Honest comparison with the other ways to give an agent your Telegram (state of t
 | Identity | bare IDs collide | marked peer IDs end-to-end with lazy migration |
 | First sync | manual | `tg bootstrap`: survives reboots, removes itself when done |
 | Send safety | sends immediately | dry-run by default, `--confirm`, mutation journal |
-| Agent integration | a doc file | packaged skill, setup wizard, self-update, auto-activation |
+| Agent integration | a doc file | packaged skill, setup wizard, self-update, auto-activation, MCP bridge for desktop chat apps |
 
 ## Credits
 

@@ -2,6 +2,32 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.8.0 (2026-08-27) — fork: telegram-to-agent-skill-cli
+
+Built-in credentials by default and desktop chat apps as first-class hosts.
+
+- Setup: Enter (or `--yes` with no flags) continues on the built-in
+  Telegram Desktop keys; own keys stay recommended for heavy syncing.
+  BREAKING-ish: `tg setup --yes` without `--api-id/--api-hash` now exits 0
+- Setup: paired credential validation (a lone TG_API_ID no longer dies
+  with ApiIdInvalidError later), retry loops on bad interactive input,
+  my.telegram.org pitfall warning (the reserved word "telegram" breaks
+  the form with a bare ERROR)
+- MCP: `tg mcp`, a read-only stdio MCP server over the local index for
+  Claude Desktop, Perplexity and ChatGPT desktop; 6 tools, no Telegram
+  session, no sends, zero new dependencies
+- Connect: `tg connect` detects the apps, writes their configs (JSON
+  merge with .bak for Claude Desktop, bounded TOML section for
+  ~/.codex/config.toml shared with ChatGPT desktop), prints the
+  Perplexity walkthrough, and self-tests the bridge with a real MCP
+  handshake before the user opens the app; new wizard step + `--apps`
+- Autosync: `tg autosync start` arms a scheduled `tg refresh` (launchd /
+  systemd user timer, default 15 min) that survives reboots and steps
+  aside while the bootstrap initial sync is pending
+- Docs: docs/DESKTOP-APPS.md guide, INSTALL.md rewritten for keyless
+  setup, honest MCP section update in both READMEs
+- Dist: plugin metadata version now guarded against pyproject drift
+
 ## 0.7.0 (2026-08-17) — fork: telegram-to-agent-skill-cli
 
 Fork of jackwener/tg-cli focused on agent integration. Highlights:

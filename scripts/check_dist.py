@@ -123,6 +123,32 @@ def main() -> None:
     else:
         fail("skills/tg plugin copy missing")
 
+    # Plugin metadata must carry the SAME version as pyproject — the release
+    # guard only checks pyproject, so drift here would ship silently.
+    try:
+        import tomllib
+    except ImportError:  # Python 3.10 — CI (3.12) still enforces this
+        tomllib = None
+    if tomllib is not None:
+        import json
+
+        pyproject_version = tomllib.load(open("pyproject.toml", "rb"))["project"][
+            "version"
+        ]
+        plugin = json.load(open(".claude-plugin/plugin.json"))
+        marketplace = json.load(open(".claude-plugin/marketplace.json"))
+        if plugin.get("version") != pyproject_version:
+            fail(
+                f"plugin.json version {plugin.get('version')} != pyproject"
+                f" {pyproject_version}"
+            )
+        for entry in marketplace.get("plugins", []):
+            if entry.get("version") != pyproject_version:
+                fail(
+                    f"marketplace.json plugin version {entry.get('version')} !="
+                    f" pyproject {pyproject_version}"
+                )
+
     print(f"OK: {sdists[-1].name} and {wheels[-1].name} honour the contract")
 
 
