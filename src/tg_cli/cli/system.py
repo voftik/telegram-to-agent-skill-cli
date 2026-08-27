@@ -195,14 +195,263 @@ def _manual_guidance(kind: str) -> str:
 
 def _stable_tg_path() -> Path | None:
     """$(uv tool dir)/<package>/bin/tg — stable across upgrades."""
+    from ..hostapps import uv_tool_tg_path
+
+    return uv_tool_tg_path()
+
+
+# ─────────────────────── tg connect ───────────────────────
+
+
+_PERPLEXITY_STEPS = (
+    "Perplexity only accepts connectors through its own UI (macOS app):\n"
+    "  1. Perplexity → Settings → Connectors\n"
+    "  2. Install the helper app (PerplexityXPC) when prompted\n"
+    "  3. Add Connector → Advanced tab\n"
+    "  4. Server Name: tg, then paste the JSON below\n"
+    "  5. Save, wait for the Running state, then enable tg under Sources"
+)
+
+
+def _resolve_command_path(command: str | None) -> Path:
+    from ..hostapps import tg_binary_path
+
+    if command:
+        p = Path(command).expanduser().resolve()
+        if not p.exists():
+            console.print(f"[red]✗ {p} does not exist[/red]")
+            raise SystemExit(1)
+        return p
     try:
-        out = subprocess.run(
-            ["uv", "tool", "dir"], capture_output=True, text=True, check=True
-        ).stdout.strip()
-    except (OSError, subprocess.CalledProcessError):
-        return None
-    candidate = Path(out) / "telegram-to-agent-skill-cli" / "bin" / "tg"
-    return candidate if candidate.exists() else None
+        return tg_binary_path()
+    except RuntimeError as e:
+        console.print(f"[red]✗ {e}[/red]")
+        raise SystemExit(1) from None
+
+
+def _announce(app: str, config_path: str) -> None:
+    console.print(f"[bold]{app}[/bold]: will add a read-only MCP entry to {config_path}")
+
+
+def _connect_one(app: str, tg_path: Path, force: bool = False) -> dict:
+    from .. import hostapps
+
+    if app == "claude-desktop":
+        return hostapps.connect_claude_desktop(tg_path, force=force)
+    if app == "codex":
+        return hostapps.connect_codex(tg_path)
+    raise ValueError(app)
+
+
+def _print_result(report: dict) -> None:
+    label = {"added": "added", "updated": "updated", "already": "already configured"}[
+        report["status"]
+    ]
+    console.print(f"[green]✓[/green] {report['app']}: {label} → {report['config_path']}")
+    if report.get("backup"):
+        console.print(f"  [dim]previous config saved to {report['backup']}[/dim]")
+
+
+def _print_selftest(tg_path: Path) -> bool:
+    from ..hostapps import bridge_selftest
+
+    console.print("[dim]Testing the bridge (the exact command the app will run)…[/dim]")
+    result = bridge_selftest(tg_path)
+    if result["ok"]:
+        console.print(
+            f"[green]✓[/green] bridge OK, {result['tools']} tools"
+            f" (server {result['server_version']})"
+        )
+        return True
+    console.print(f"[red]✗ bridge self-test failed: {result['error']}[/red]")
+    console.print(
+        "[yellow]The app would show a dead server. Fix the tg install first"
+        " (try `tg connect status`).[/yellow]"
+    )
+    return False
+
+
+def _print_perplexity(tg_path: Path) -> None:
+    from ..hostapps import snippet_json
+
+    snippet = snippet_json(tg_path)
+    console.print(_PERPLEXITY_STEPS)
+    console.print(snippet, markup=False, highlight=False)
+    import shutil as _shutil
+
+    if _shutil.which("pbcopy"):
+        try:
+            subprocess.run(["pbcopy"], input=snippet, text=True, check=True)
+            console.print("[dim]Copied to clipboard.[/dim]")
+        except (OSError, subprocess.CalledProcessError):
+            pass
+
+
+def _restart_hint(app: str) -> None:
+    hints = {
+        "claude-desktop": "Fully restart Claude Desktop (Cmd+Q, reopen) to load it.",
+        "codex": (
+            "Restart the ChatGPT desktop app or Codex session to load it."
+            " Works in both chat and Codex modes."
+        ),
+    }
+    console.print(f"  [dim]{hints[app]}[/dim]")
+
+
+@system_group.group("connect", invoke_without_command=True)
+@click.option("--yes", is_flag=True, help="Connect every detected app without asking")
+@click.option("--command", "command_path", default=None, help="Absolute path to tg")
+@click.pass_context
+def connect_group(ctx: click.Context, yes: bool, command_path: str | None):
+    """Wire the read-only MCP bridge into desktop chat apps.
+
+    Claude Desktop and Codex/ChatGPT desktop are configured automatically;
+    Perplexity gets a copy-paste snippet for its Connectors UI.
+    """
+    if ctx.invoked_subcommand is not None:
+        return
+    from ..hostapps import detect_apps
+
+    tg_path = _resolve_command_path(command_path)
+    detected = detect_apps()
+    any_available = False
+    connected: list[str] = []
+
+    for app in ("claude-desktop", "codex"):
+        if not detected[app]["detected"]:
+            continue
+        any_available = True
+        _announce(app, detected[app]["config_path"])
+        if not yes and not click.confirm(f"Connect {app}?", default=True):
+            continue
+        try:
+            report = _connect_one(app, tg_path)
+        except RuntimeError as e:
+            console.print(f"[red]✗ {app}: {e}[/red]")
+            continue
+        _print_result(report)
+        _restart_hint(app)
+        connected.append(app)
+
+    if detected["perplexity"]["detected"]:
+        any_available = True
+        console.print("\n[bold]perplexity[/bold]: detected")
+        _print_perplexity(tg_path)
+
+    if not any_available:
+        console.print(
+            "No desktop chat apps detected. Supported: Claude Desktop,"
+            " Codex/ChatGPT desktop, Perplexity. Snippets: tg connect manual"
+        )
+        return
+    if connected:
+        _print_selftest(tg_path)
+
+
+@connect_group.command("claude-desktop")
+@click.option("--force", is_flag=True, help="Create the config directory if missing")
+@click.option("--command", "command_path", default=None, help="Absolute path to tg")
+@structured_output_options
+def connect_claude_cmd(force: bool, command_path: str | None, as_json: bool, as_yaml: bool):
+    """Add the tg bridge to Claude Desktop's MCP config."""
+    tg_path = _resolve_command_path(command_path)
+    from ..hostapps import connect_claude_desktop
+
+    try:
+        report = connect_claude_desktop(tg_path, force=force)
+    except RuntimeError as e:
+        if emit_error("connect_failed", str(e)):
+            raise SystemExit(1) from None
+        console.print(f"[red]✗ {e}[/red]")
+        raise SystemExit(1) from None
+    report["selftest"] = None
+    if not as_json and not as_yaml:
+        _print_result(report)
+        _restart_hint("claude-desktop")
+        _print_selftest(tg_path)
+        return
+    from ..hostapps import bridge_selftest
+
+    report["selftest"] = bridge_selftest(tg_path)
+    emit_structured(report, as_json=as_json, as_yaml=as_yaml)
+
+
+@connect_group.command("codex")
+@click.option("--command", "command_path", default=None, help="Absolute path to tg")
+@structured_output_options
+def connect_codex_cmd(command_path: str | None, as_json: bool, as_yaml: bool):
+    """Add the tg bridge to Codex/ChatGPT desktop (~/.codex/config.toml)."""
+    tg_path = _resolve_command_path(command_path)
+    from ..hostapps import connect_codex
+
+    try:
+        report = connect_codex(tg_path)
+    except RuntimeError as e:
+        if emit_error("connect_failed", str(e)):
+            raise SystemExit(1) from None
+        console.print(f"[red]✗ {e}[/red]")
+        raise SystemExit(1) from None
+    if not as_json and not as_yaml:
+        _print_result(report)
+        _restart_hint("codex")
+        _print_selftest(tg_path)
+        return
+    from ..hostapps import bridge_selftest
+
+    report["selftest"] = bridge_selftest(tg_path)
+    emit_structured(report, as_json=as_json, as_yaml=as_yaml)
+
+
+@connect_group.command("perplexity")
+@click.option("--command", "command_path", default=None, help="Absolute path to tg")
+def connect_perplexity_cmd(command_path: str | None):
+    """Print the Perplexity Connectors walkthrough and JSON snippet."""
+    tg_path = _resolve_command_path(command_path)
+    _print_perplexity(tg_path)
+
+
+@connect_group.command("manual")
+@click.option("--command", "command_path", default=None, help="Absolute path to tg")
+def connect_manual_cmd(command_path: str | None):
+    """Print generic JSON and TOML snippets for any MCP-capable host."""
+    from ..hostapps import snippet_json, snippet_toml
+
+    tg_path = _resolve_command_path(command_path)
+    console.print("JSON (mcpServers-style hosts, Perplexity Advanced tab):")
+    console.print(snippet_json(tg_path), markup=False, highlight=False)
+    console.print("\nTOML (~/.codex/config.toml):")
+    console.print(snippet_toml(tg_path), markup=False, highlight=False)
+
+
+@connect_group.command("status")
+@structured_output_options
+def connect_status_cmd(as_json: bool, as_yaml: bool):
+    """Show detection and configuration state per desktop app."""
+    from ..hostapps import detect_apps
+
+    report = detect_apps()
+    if emit_structured(report, as_json=as_json, as_yaml=as_yaml):
+        return
+    from rich.table import Table
+
+    table = Table(title="Desktop apps")
+    table.add_column("app")
+    table.add_column("detected")
+    table.add_column("configured")
+    table.add_column("config path")
+    for app, info in report.items():
+        configured = "yes" if info["configured"] else "no"
+        if info["broken"]:
+            configured = "[red]broken (tg path missing)[/red]"
+        table.add_row(
+            app,
+            "yes" if info["detected"] else "no",
+            configured,
+            info["config_path"] or "(UI only)",
+        )
+    console.print(table)
+    if any(info["broken"] for info in report.values()):
+        console.print("[yellow]Fix broken entries by rerunning tg connect.[/yellow]")
 
 
 # ─────────────────────── tg setup ───────────────────────
@@ -337,6 +586,14 @@ def _step_credentials(
 )
 @click.option("--skip-login", is_flag=True, help="Skip the Telegram sign-in step")
 @click.option("--skip-bootstrap", is_flag=True, help="Do not offer the initial sync")
+@click.option(
+    "--apps",
+    default=None,
+    help=(
+        "Desktop chat apps to wire over MCP: claude-desktop,codex or none"
+        " (default: detect and ask; silently skipped under --yes)"
+    ),
+)
 def setup_cmd(
     yes: bool,
     api_id: int | None,
@@ -344,6 +601,7 @@ def setup_cmd(
     agents: str | None,
     skip_login: bool,
     skip_bootstrap: bool,
+    apps: str | None,
 ):
     """Interactive setup wizard: credentials, sign-in, agent skill, first sync."""
     import asyncio
@@ -410,10 +668,13 @@ def setup_cmd(
         for agent, state in snippets.items():
             console.print(f"  [dim]{agent}: {state}[/dim]")
 
-    # 4. Initial sync ------------------------------------------------------
+    # 4. Desktop apps ------------------------------------------------------
+    app_results = _step_desktop_apps(apps, yes)
+
+    # 5. Initial sync ------------------------------------------------------
     if not skip_bootstrap and not yes:
         console.print(
-            "\n[bold]4. Initial sync[/bold] — pulls your chats into the local index."
+            "\n[bold]5. Initial sync[/bold] — pulls your chats into the local index."
             " Big accounts take hours; it survives reboots and removes itself"
             " when done."
         )
@@ -425,7 +686,7 @@ def setup_cmd(
         else:
             console.print("[dim]Later: tg bootstrap start[/dim]")
 
-    # 5. Summary -----------------------------------------------------------
+    # 6. Summary -----------------------------------------------------------
     from ..update import current_version, detect_install
 
     table = Table(title="Setup summary", show_header=False)
@@ -433,5 +694,77 @@ def setup_cmd(
     table.add_row("install", detect_install())
     table.add_row("data dir", str(data_dir))
     table.add_row("skill", skillpkg.skill_status().get("mode", "not installed"))
+    if app_results:
+        table.add_row(
+            "desktop apps",
+            ", ".join(f"{app}: {state}" for app, state in app_results.items()),
+        )
     table.add_row("next", "tg chats · tg brief <chat> · tg search '…'")
     console.print(table)
+
+
+def _step_desktop_apps(apps: str | None, yes: bool) -> dict[str, str]:
+    """Wizard step 4: wire desktop chat apps over the MCP bridge.
+
+    apps=None means detect and ask (silently skipped under --yes);
+    an explicit list connects without prompting; 'none' skips.
+    """
+    if apps == "none" or (yes and apps is None):
+        return {}
+
+    from ..hostapps import detect_apps
+
+    results: dict[str, str] = {}
+    detected = detect_apps()
+
+    if apps is not None:
+        wanted = [a.strip() for a in apps.split(",") if a.strip()]
+        bad = [a for a in wanted if a not in ("claude-desktop", "codex")]
+        if bad:
+            console.print(
+                f"[red]--apps: unknown app(s) {', '.join(bad)};"
+                " supported: claude-desktop,codex or none[/red]"
+            )
+            raise SystemExit(1)
+    else:
+        wanted = [
+            a for a in ("claude-desktop", "codex") if detected[a]["detected"]
+        ]
+
+    show_perplexity = apps is None and detected["perplexity"]["detected"]
+    if not wanted and not show_perplexity:
+        console.print(
+            "\n[dim]4. Desktop apps: none detected. Later: tg connect[/dim]"
+        )
+        return {}
+
+    console.print(
+        "\n[bold]4. Desktop apps[/bold] — tg can serve your Telegram index to"
+        " desktop chat apps over MCP (read-only)."
+    )
+    tg_path = _resolve_command_path(None)
+    connected = False
+    for app in wanted:
+        _announce(app, detected[app]["config_path"])
+        if apps is None and not click.confirm(f"Connect {app}?", default=True):
+            results[app] = "skipped"
+            continue
+        try:
+            report = _connect_one(app, tg_path)
+        except RuntimeError as e:
+            console.print(f"[red]✗ {app}: {e}[/red]")
+            results[app] = "failed"
+            continue
+        _print_result(report)
+        _restart_hint(app)
+        results[app] = report["status"]
+        connected = True
+
+    if show_perplexity:
+        console.print("\n[bold]perplexity[/bold]: detected")
+        _print_perplexity(tg_path)
+        results["perplexity"] = "manual"
+
+    if connected:
+        _print_selftest(tg_path)
+    return results
