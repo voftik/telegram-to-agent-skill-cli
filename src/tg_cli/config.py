@@ -85,6 +85,25 @@ def is_default_api_id() -> bool:
     return not os.environ.get("TG_API_ID", "")
 
 
+def get_api_credentials() -> tuple[int, str]:
+    """Return (api_id, api_hash) as a validated pair.
+
+    Both env vars set → the custom pair. Neither → the built-in Telegram
+    Desktop keys. Exactly one → an error: Telegram rejects a mismatched
+    pair with ApiIdInvalidError, so fail early with a fixable message.
+    """
+    raw_id = os.environ.get("TG_API_ID", "")
+    raw_hash = os.environ.get("TG_API_HASH", "")
+    if raw_id and raw_hash:
+        return int(raw_id), raw_hash
+    if raw_id or raw_hash:
+        raise RuntimeError(
+            "TG_API_ID and TG_API_HASH must be set together; "
+            "unset both to use the built-in keys"
+        )
+    return _DEFAULT_API_ID, _DEFAULT_API_HASH
+
+
 def get_session_name() -> str:
     return os.environ.get("TG_SESSION_NAME", "tg_cli")
 

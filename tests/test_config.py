@@ -131,3 +131,34 @@ class TestConfig:
 
         path = cfg.get_db_path()
         assert path == tmp_path / "runtime" / "messages.db"
+
+
+class TestApiCredentialPair:
+    def test_both_set_returns_custom_pair(self, monkeypatch):
+        monkeypatch.setenv("TG_API_ID", "777")
+        monkeypatch.setenv("TG_API_HASH", "d" * 32)
+        from tg_cli.config import get_api_credentials
+
+        assert get_api_credentials() == (777, "d" * 32)
+
+    def test_neither_set_returns_builtin_pair(self, monkeypatch):
+        monkeypatch.delenv("TG_API_ID", raising=False)
+        monkeypatch.delenv("TG_API_HASH", raising=False)
+        from tg_cli.config import get_api_credentials
+
+        assert get_api_credentials() == (2040, "b18441a1ff607e10a989891a5462e627")
+
+    def test_lone_variable_raises(self, monkeypatch):
+        import pytest
+
+        from tg_cli.config import get_api_credentials
+
+        monkeypatch.setenv("TG_API_ID", "777")
+        monkeypatch.delenv("TG_API_HASH", raising=False)
+        with pytest.raises(RuntimeError, match="together"):
+            get_api_credentials()
+
+        monkeypatch.delenv("TG_API_ID", raising=False)
+        monkeypatch.setenv("TG_API_HASH", "d" * 32)
+        with pytest.raises(RuntimeError, match="together"):
+            get_api_credentials()

@@ -14,8 +14,7 @@ from telethon.errors import FloodWaitError
 from telethon.tl.types import Channel, Chat, User
 
 from .config import (
-    get_api_hash,
-    get_api_id,
+    get_api_credentials,
     get_session_path,
     is_default_api_id,
 )
@@ -89,15 +88,14 @@ _default_api_warned = False
 async def connect() -> AsyncGenerator[TelegramClient, None]:
     """Async context manager for Telegram client — single connection, reuse within scope."""
     global _default_api_warned
-    api_id = get_api_id()
-    api_hash = get_api_hash()
+    api_id, api_hash = get_api_credentials()
 
     if not _default_api_warned and is_default_api_id():
         _default_api_warned = True
         console.print(
-            "[yellow]⚠ Using default Telegram Desktop API credentials (api_id=2040).\n"
-            "  This increases the risk of account restrictions.\n"
-            "  Get your own at https://my.telegram.org and set TG_API_ID / TG_API_HASH.[/yellow]"
+            "[dim]Using built-in Telegram Desktop API keys (api_id 2040). "
+            "Fine for regular use; for heavy syncing get your own at "
+            "https://my.telegram.org and rerun tg setup.[/dim]"
         )
 
     c = TelegramClient(
@@ -137,10 +135,14 @@ async def check_auth() -> dict:
     prompt for phone/code — safe for installers and agents. Distinguishes
     "not authorized" from "network unreachable".
     """
+    try:
+        api_id, api_hash = get_api_credentials()
+    except RuntimeError as e:
+        return {"authenticated": False, "reachable": False, "error": str(e)}
     c = TelegramClient(
         get_session_path(),
-        get_api_id(),
-        get_api_hash(),
+        api_id,
+        api_hash,
         device_model=_DEVICE_MODEL,
         system_version=_SYSTEM_VERSION,
         app_version=_APP_VERSION,

@@ -1,4 +1,4 @@
-"""Tests for the tg setup wizard (non-interactive paths)."""
+"""Tests for the tg setup wizard (credentials step and non-interactive paths)."""
 
 from __future__ import annotations
 
@@ -43,16 +43,27 @@ class TestSetupWizard:
         assert result.exit_code == 0, result.output
         env = (data / ".env").read_text()
         assert "TG_API_ID=12345" in env
+        assert f"TG_API_HASH={'a' * 32}" in env
         assert ((data / ".env").stat().st_mode & 0o777) == 0o600
         assert (home / ".agents" / "skills" / "tg" / "SKILL.md").is_file()
         assert "tg-skill" in (home / ".claude" / "CLAUDE.md").read_text()
 
-    def test_yes_without_creds_fails_loudly(self, runner, wizard_home):
+    def test_yes_without_creds_uses_builtin(self, runner, wizard_home):
+        home, data = wizard_home
         result = runner.invoke(
             cli, ["setup", "--yes", "--skip-login", "--skip-bootstrap"]
         )
+        assert result.exit_code == 0, result.output
+        assert "built-in" in result.output.lower()
+        # Built-ins are the absence of an override: nothing is written.
+        assert not (data / ".env").exists()
+
+    def test_yes_with_only_api_id_fails(self, runner, wizard_home):
+        result = runner.invoke(
+            cli, ["setup", "--yes", "--skip-login", "--skip-bootstrap", "--api-id", "1"]
+        )
         assert result.exit_code == 1
-        assert "--api-id" in result.output
+        assert "together" in result.output
 
     def test_existing_env_not_clobbered(self, runner, wizard_home):
         home, data = wizard_home
@@ -65,6 +76,17 @@ class TestSetupWizard:
         assert result.exit_code == 0, result.output
         assert (data / ".env").read_text() == "TG_API_ID=999\nTG_API_HASH=fff\n"
 
+    def test_env_with_lone_api_id_errors(self, runner, wizard_home):
+        home, data = wizard_home
+        data.mkdir(parents=True, exist_ok=True)
+        (data / ".env").write_text("TG_API_ID=1\n")
+        result = runner.invoke(
+            cli,
+            ["setup", "--yes", "--skip-login", "--skip-bootstrap", "--agents", "none"],
+        )
+        assert result.exit_code == 1
+        assert "together" in result.output
+
     def test_bad_api_hash_rejected(self, runner, wizard_home):
         result = runner.invoke(
             cli,
@@ -75,3 +97,40 @@ class TestSetupWizard:
         )
         assert result.exit_code == 1
         assert "32" in result.output
+
+    def test_interactive_enter_uses_builtin(self, runner, wizard_home):
+        home, data = wizard_home
+        result = runner.invoke(
+            cli,
+            ["setup", "--skip-login", "--skip-bootstrap", "--agents", "claude"],
+            input="\n",
+        )
+        assert result.exit_code == 0, result.output
+        assert "built-in keys" in result.output
+        assert not (data / ".env").exists()
+
+    def test_interactive_bad_hash_retries(self, runner, wizard_home):
+        home, data = wizard_home
+        result = runner.invoke(
+            cli,
+            ["setup", "--skip-login", "--skip-bootstrap", "--agents", "claude"],
+            input="123\nnot-hex\n" + "b" * 32 + "\n",
+        )
+        assert result.exit_code == 0, result.output
+        assert "try again" in result.output
+        env = (data / ".env").read_text()
+        assert "TG_API_ID=123" in env
+        assert f"TG_API_HASH={'b' * 32}" in env
+
+    def test_write_env_pair_replaces_stale_lines(self, tmp_path):
+        from tg_cli.cli.system import _write_env_pair
+
+        env_path = tmp_path / ".env"
+        env_path.write_text("DATA_DIR=/keep/me\nTG_API_ID=1\nTG_API_HASH=old\n")
+        _write_env_pair(env_path, 42, "c" * 32)
+        content = env_path.read_text()
+        assert "DATA_DIR=/keep/me" in content
+        assert "TG_API_ID=42" in content
+        assert f"TG_API_HASH={'c' * 32}" in content
+        assert "TG_API_HASH=old" not in content
+        assert content.count("TG_API_ID=") == 1

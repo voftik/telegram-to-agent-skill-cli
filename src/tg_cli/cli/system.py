@@ -208,6 +208,124 @@ def _stable_tg_path() -> Path | None:
 # ─────────────────────── tg setup ───────────────────────
 
 
+_MY_TELEGRAM_HINT = (
+    "Built-in Telegram Desktop keys are used by default and work out of the box.\n"
+    "Your own keys from [link]https://my.telegram.org[/link] are recommended for"
+    " heavy syncing.\n"
+    "Creating your own app there? Two pitfalls:\n"
+    "  - the word \"telegram\" in any form field makes the site fail with a bare ERROR\n"
+    "  - App title, Short name and Platform are required; URL may stay empty"
+)
+
+_HASH_RE = r"[0-9a-f]{32}"
+
+
+def _write_env_pair(env_path: Path, api_id: int, api_hash: str) -> None:
+    """Replace any TG_API_ID/TG_API_HASH lines, keep the rest, write atomically."""
+    from ..config import harden_path
+
+    kept: list[str] = []
+    if env_path.is_file():
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            if line.startswith(("TG_API_ID=", "TG_API_HASH=")):
+                continue
+            kept.append(line)
+    kept.extend([f"TG_API_ID={api_id}", f"TG_API_HASH={api_hash}"])
+    tmp = env_path.with_name(env_path.name + ".tmp")
+    tmp.write_text("\n".join(kept) + "\n", encoding="utf-8")
+    harden_path(tmp)
+    tmp.replace(env_path)
+    harden_path(env_path)
+
+
+def _step_credentials(
+    env_path: Path, api_id: int | None, api_hash: str | None, yes: bool
+) -> str:
+    """Wizard step 1. Returns 'custom' | 'builtin' | 'existing'.
+
+    Built-in keys are the default: choosing them writes nothing to .env
+    (absence means built-ins; env vars still override).
+    """
+    import os as _os
+    import re
+
+    existing = env_path.read_text(encoding="utf-8") if env_path.is_file() else ""
+    env_has_id = bool(re.search(r"^TG_API_ID=\d+", existing, re.MULTILINE))
+    env_has_hash = bool(re.search(r"^TG_API_HASH=\S+", existing, re.MULTILINE))
+    proc_has_id = bool(_os.environ.get("TG_API_ID"))
+    proc_has_hash = bool(_os.environ.get("TG_API_HASH"))
+    has_id = env_has_id or proc_has_id
+    has_hash = env_has_hash or proc_has_hash
+
+    if has_id and has_hash and api_id is None and api_hash is None:
+        console.print("[green]✓[/green] Credentials already configured")
+        return "existing"
+    if has_id != has_hash and api_id is None and api_hash is None:
+        console.print(
+            "[red]TG_API_ID and TG_API_HASH must be set together. Add the missing"
+            f" one to {env_path} or remove the other, then rerun tg setup.[/red]"
+        )
+        raise SystemExit(1)
+
+    console.print(f"\n[bold]1. API credentials[/bold]\n{_MY_TELEGRAM_HINT}")
+
+    if (api_id is None) != (api_hash is None):
+        if yes:
+            console.print(
+                "[red]--api-id and --api-hash must be given together"
+                " (or neither to use built-in keys)[/red]"
+            )
+            raise SystemExit(1)
+        # Interactive: prompt only for the missing half below.
+
+    if yes:
+        if api_id is None and api_hash is None:
+            console.print(
+                "Using built-in Telegram Desktop keys."
+                " Pass --api-id and --api-hash to use your own."
+            )
+            return "builtin"
+        if not re.fullmatch(_HASH_RE, api_hash or ""):
+            console.print("[red]api_hash must be 32 lowercase hex characters[/red]")
+            raise SystemExit(1)
+    else:
+        if api_id is None:
+            raw = click.prompt(
+                "api_id (press Enter to use built-in keys)",
+                default="",
+                show_default=False,
+            ).strip()
+            while raw and not raw.isdigit():
+                console.print("[yellow]api_id must be a number, try again[/yellow]")
+                raw = click.prompt(
+                    "api_id (press Enter to use built-in keys)",
+                    default="",
+                    show_default=False,
+                ).strip()
+            if not raw:
+                console.print(
+                    "[green]✓[/green] Using built-in keys"
+                    " (rerun tg setup anytime to switch to your own)"
+                )
+                return "builtin"
+            api_id = int(raw)
+        if api_hash is None:
+            api_hash = click.prompt("api_hash (32 hex characters from the same page)")
+        while not re.fullmatch(_HASH_RE, api_hash or ""):
+            console.print(
+                "[yellow]api_hash must be 32 lowercase hex characters, try again[/yellow]"
+            )
+            api_hash = click.prompt("api_hash (32 hex characters from the same page)")
+
+    _write_env_pair(env_path, api_id, api_hash)
+    # .env was already loaded at import time — export the new pair so the
+    # sign-in step of THIS wizard run uses it, not the built-in keys.
+    _os.environ["TG_API_ID"] = str(api_id)
+    _os.environ["TG_API_HASH"] = api_hash
+    console.print(f"[green]✓[/green] Credentials written to {env_path}")
+    return "custom"
+
+
 @system_group.command("setup")
 @click.option("--yes", is_flag=True, help="Non-interactive: accept defaults, fail on gaps")
 @click.option("--api-id", type=int, default=None, help="Telegram api_id (my.telegram.org)")
@@ -229,19 +347,18 @@ def setup_cmd(
 ):
     """Interactive setup wizard: credentials, sign-in, agent skill, first sync."""
     import asyncio
-    import re
 
     from rich.panel import Panel
     from rich.table import Table
 
     from .. import skillpkg
     from ..client import check_auth
-    from ..config import get_data_dir, harden_path
+    from ..config import get_data_dir
 
     console.print(
         Panel.fit(
             "[bold]tg setup[/bold] — Telegram as context for coding agents\n"
-            "Steps: credentials → sign-in → agent skill → initial sync",
+            "Steps: credentials → sign-in → agent skill → desktop apps → initial sync",
             border_style="cyan",
         )
     )
@@ -249,37 +366,7 @@ def setup_cmd(
     # 1. Credentials -------------------------------------------------------
     data_dir = get_data_dir()
     env_path = data_dir / ".env"
-    existing = env_path.read_text() if env_path.is_file() else ""
-    have_creds = "TG_API_ID=" in existing and re.search(r"TG_API_ID=\d+", existing)
-
-    if not have_creds:
-        import os as _os
-
-        have_creds = bool(_os.environ.get("TG_API_ID"))
-    if not have_creds:
-        console.print(
-            "\n[bold]1. API credentials[/bold] — create an application at"
-            " [link]https://my.telegram.org[/link] → API development tools."
-        )
-        if api_id is None:
-            if yes:
-                console.print("[red]--yes given but --api-id/--api-hash missing[/red]")
-                raise SystemExit(1)
-            api_id = click.prompt("api_id", type=int)
-        if api_hash is None:
-            if yes:
-                console.print("[red]--yes given but --api-hash missing[/red]")
-                raise SystemExit(1)
-            api_hash = click.prompt("api_hash")
-        if not re.fullmatch(r"[0-9a-f]{32}", api_hash or ""):
-            console.print("[red]api_hash must be 32 lowercase hex characters[/red]")
-            raise SystemExit(1)
-        with open(env_path, "a", encoding="utf-8") as f:
-            f.write(f"TG_API_ID={api_id}\nTG_API_HASH={api_hash}\n")
-        harden_path(env_path)
-        console.print(f"[green]✓[/green] Credentials written to {env_path}")
-    else:
-        console.print("[green]✓[/green] Credentials already configured")
+    _step_credentials(env_path, api_id, api_hash, yes)
 
     # 2. Sign-in -----------------------------------------------------------
     if not skip_login:
